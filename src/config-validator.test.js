@@ -20,7 +20,7 @@ describe('ConfigValidator', () => {
       expect(result.errors).toEqual([]);
     });
 
-    test('should pass with minimal valid configuration', () => {
+    test('should fail when PIN is missing', () => {
       const config = {
         email: 'user@domain.com',
         password: 'Valid$42',
@@ -28,8 +28,8 @@ describe('ConfigValidator', () => {
 
       const result = ConfigValidator.validate(config);
 
-      expect(result.valid).toBe(true);
-      expect(result.errors).toEqual([]);
+      expect(result.valid).toBe(false);
+      expect(result.errors).toContain('4-digit vehicle PIN is required for remote commands');
     });
 
     test('should fail when email is missing', () => {
@@ -62,7 +62,7 @@ describe('ConfigValidator', () => {
       expect(result.valid).toBe(false);
       expect(result.errors).toContain('Email is required');
       expect(result.errors).toContain('Password is required');
-      expect(result.errors.length).toBe(2);
+      expect(result.errors).toContain('4-digit vehicle PIN is required for remote commands');
     });
 
     test('should fail when email format is invalid', () => {
@@ -113,7 +113,7 @@ describe('ConfigValidator', () => {
       expect(result.errors).toContain('Password seems unusually long (may not work with Mopar.com)');
     });
 
-    test('should pass with 8-character password', () => {
+    test('should fail when pin missing even if password valid', () => {
       const config = {
         email: 'test@example.com',
         password: 'password',
@@ -121,47 +121,24 @@ describe('ConfigValidator', () => {
 
       const result = ConfigValidator.validate(config);
 
-      expect(result.valid).toBe(true);
-      expect(result.errors).toEqual([]);
+      expect(result.valid).toBe(false);
+      expect(result.errors).toContain('4-digit vehicle PIN is required for remote commands');
     });
 
-    test('should pass with password without special characters', () => {
-      const config = {
-        email: 'test@example.com',
-        password: 'MyPassword15',
-      };
-
-      const result = ConfigValidator.validate(config);
-
-      expect(result.valid).toBe(true);
-      expect(result.errors).toEqual([]);
-    });
-
-    test('should pass with password containing special characters', () => {
-      const config = {
-        email: 'test@example.com',
-        password: 'MyPass42!',
-      };
-
-      const result = ConfigValidator.validate(config);
-
-      expect(result.valid).toBe(true);
-      expect(result.errors).toEqual([]);
-    });
-
-    test('should pass with various valid passwords', () => {
+    test('should still enforce PIN even with valid passwords', () => {
       const validPasswords = [
-        'password123',      // no special char, no uppercase
-        'PASSWORD123',      // no special char, no lowercase
-        'Password',         // no number, no special char
-        'MyPass42!',        // all requirements (if they existed)
-        'Secure$2024',      // all requirements
+        'password123',
+        'PASSWORD123',
+        'Password',
+        'MyPass42!',
+        'Secure$2024',
       ];
 
       validPasswords.forEach((password) => {
         const config = { email: 'test@example.com', password };
         const result = ConfigValidator.validate(config);
-        expect(result.valid).toBe(true);
+        expect(result.valid).toBe(false);
+        expect(result.errors).toContain('4-digit vehicle PIN is required for remote commands');
       });
     });
 
@@ -204,7 +181,7 @@ describe('ConfigValidator', () => {
       expect(result.errors).toContain('PIN must be exactly 4 digits (e.g. "1234")');
     });
 
-    test('should pass when PIN is omitted', () => {
+    test('should fail when PIN is omitted', () => {
       const config = {
         email: 'test@example.com',
         password: 'MyPass42!',
@@ -212,7 +189,8 @@ describe('ConfigValidator', () => {
 
       const result = ConfigValidator.validate(config);
 
-      expect(result.valid).toBe(true);
+      expect(result.valid).toBe(false);
+      expect(result.errors).toContain('4-digit vehicle PIN is required for remote commands');
     });
 
     test('should pass with valid 4-digit PIN', () => {
@@ -245,12 +223,14 @@ describe('ConfigValidator', () => {
       const config = {
         email: 'test@example.com',
         password: 'MyPass42!',
+        pin: '1234',
         debug: true,
       };
 
       const result = ConfigValidator.validate(config);
 
       expect(result.valid).toBe(true);
+      expect(result.errors).toEqual([]);
     });
 
     test('should fail with multiple validation errors', () => {

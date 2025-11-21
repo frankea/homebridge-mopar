@@ -10,7 +10,7 @@ const MoparAuth = require('./auth');
 const MoparAPI = require('./api');
 
 // Mock Homebridge globals
-const MoparPlatform = (() => {
+const { MoparPlatform, mockHomebridge } = (() => {
   const mockHomebridge = {
     hap: {
       Service: class MockService {
@@ -71,8 +71,11 @@ const MoparPlatform = (() => {
 
   // Extract the platform class from the registration call
   const registrationCall = mockHomebridge.registerPlatform.mock.calls[0];
-  return registrationCall[2];
+  return { MoparPlatform: registrationCall[2], mockHomebridge };
 })();
+
+const Characteristic = mockHomebridge.hap.Characteristic;
+const Service = mockHomebridge.hap.Service;
 
 describe('MoparPlatform', () => {
   let platform;
@@ -98,6 +101,8 @@ describe('MoparPlatform', () => {
       registerPlatformAccessories: jest.fn(),
       unregisterPlatformAccessories: jest.fn(),
     };
+
+    mockLog.warn = jest.fn();
 
     // Mock config
     mockConfig = {
@@ -458,6 +463,40 @@ describe('MoparPlatform', () => {
       expect(mockLog).toHaveBeenCalledWith('LOCK SUCCESS!');
     });
 
+    test('configureLockService should create lock service when missing', () => {
+      platform = new MoparPlatform(mockLog, mockConfig, mockApi);
+      const mockCharacteristic = {
+        onGet: jest.fn().mockReturnThis(),
+        onSet: jest.fn().mockReturnThis(),
+      };
+      const mockService = {
+        getCharacteristic: jest.fn().mockReturnValue(mockCharacteristic),
+        updateCharacteristic: jest.fn(),
+      };
+      const accessory = {
+        addService: jest.fn().mockReturnValue(mockService),
+        getServiceById: jest.fn().mockReturnValue(null),
+        context: {},
+      };
+
+      platform.configureLockService(accessory, { vin: 'VIN123', year: '2022', make: 'JEEP', model: 'Wrangler' });
+
+      expect(accessory.addService).toHaveBeenCalledWith(expect.anything(), expect.any(String), 'VIN123-lock');
+      expect(accessory.getServiceById).toHaveBeenCalledWith(expect.anything(), 'VIN123-lock');
+      expect(mockCharacteristic.onSet).toHaveBeenCalled();
+      expect(mockCharacteristic.onGet).toHaveBeenCalled();
+    });
+
+    test('should block command when pin missing', async () => {
+      platform.pin = undefined;
+
+      const result = await platform.sendCommand('VIN123', 'LOCK');
+
+      expect(result).toBe(false);
+      expect(platform.moparAPI.sendCommand).not.toHaveBeenCalled();
+      expect(mockLog.warn).toHaveBeenCalledWith('REMOTE COMMAND BLOCKED');
+    });
+
     test('should send unlock command successfully', async () => {
       const result = await platform.sendCommand('VIN123', 'UNLOCK');
 
@@ -513,6 +552,16 @@ describe('MoparPlatform', () => {
       expect(platform.moparAPI.startEngine).toHaveBeenCalledWith('VIN123', '1234');
       expect(mockLog).toHaveBeenCalledWith('Starting engine for VIN123...');
       expect(mockLog).toHaveBeenCalledWith('Engine START SUCCESS!');
+    });
+
+    test('should block engine start when pin missing', async () => {
+      platform.pin = '12';
+
+      const result = await platform.startEngine('VIN123');
+
+      expect(result).toBe(false);
+      expect(platform.moparAPI.startEngine).not.toHaveBeenCalled();
+      expect(mockLog.warn).toHaveBeenCalledWith('REMOTE COMMAND BLOCKED');
     });
 
     test('should handle engine start failure', async () => {
@@ -574,6 +623,16 @@ describe('MoparPlatform', () => {
       expect(mockLog).toHaveBeenCalledWith('Engine STOP SUCCESS!');
     });
 
+    test('should block engine stop when pin missing', async () => {
+      platform.pin = undefined;
+
+      const result = await platform.stopEngine('VIN123');
+
+      expect(result).toBe(false);
+      expect(platform.moparAPI.stopEngine).not.toHaveBeenCalled();
+      expect(mockLog.warn).toHaveBeenCalledWith('REMOTE COMMAND BLOCKED');
+    });
+
     test('should handle engine stop failure', async () => {
       platform.moparAPI.pollCommandStatus.mockResolvedValue({ success: false, status: 'FAILED' });
 
@@ -617,6 +676,16 @@ describe('MoparPlatform', () => {
       expect(mockLog).toHaveBeenCalledWith('Horn and lights SUCCESS!');
     });
 
+    test('should block horn and lights when pin missing', async () => {
+      platform.pin = null;
+
+      const result = await platform.hornAndLights('VIN123');
+
+      expect(result).toBe(false);
+      expect(platform.moparAPI.hornAndLights).not.toHaveBeenCalled();
+      expect(mockLog.warn).toHaveBeenCalledWith('REMOTE COMMAND BLOCKED');
+    });
+
     test('should handle horn and lights failure', async () => {
       platform.moparAPI.pollCommandStatus.mockResolvedValue({ success: false, status: 'TIMEOUT' });
 
@@ -650,6 +719,16 @@ describe('MoparPlatform', () => {
       expect(platform.moparAPI.setClimate).toHaveBeenCalledWith('VIN123', '1234', 72);
       expect(mockLog).toHaveBeenCalledWith('Setting climate to 72°F for VIN123...');
       expect(mockLog).toHaveBeenCalledWith('Climate set to 72°F SUCCESS!');
+    });
+
+    test('should block climate command when pin missing', async () => {
+      platform.pin = undefined;
+
+      const result = await platform.setClimate('VIN123', 72);
+
+      expect(result).toBe(false);
+      expect(platform.moparAPI.setClimate).not.toHaveBeenCalled();
+      expect(mockLog.warn).toHaveBeenCalledWith('REMOTE COMMAND BLOCKED');
     });
 
     test('should handle climate control failure', async () => {

@@ -19,10 +19,10 @@ This plugin was created to replace [homebridge-uconnect](https://github.com/gyah
 
 ## Features
 
-- Lock/Unlock doors
-- Remote Start/Stop engine
-- Horn & Lights activation
-- Climate control
+- Lock/Unlock doors (requires valid PIN)
+- Remote Start/Stop engine (requires valid PIN)
+- Horn & Lights activation (requires valid PIN)
+- Climate control (requires valid PIN)
 - Battery status monitoring
 - Door sensors (contact sensors for all doors)
 - Automated authentication with proactive session refresh (50 minutes + 20 hours)
@@ -71,7 +71,7 @@ Add the following to your Homebridge `config.json`:
 | `name` | Yes | Name for the platform (e.g., "Mopar") |
 | `email` | Yes | Your Mopar.com account email |
 | `password` | Yes | Your Mopar.com account password |
-| `pin` | Yes | Your 4-digit vehicle PIN |
+| `pin` | Yes | **Required** 4-digit vehicle PIN for every remote command |
 | `debug` | No | Enable verbose debug logging (default: `false`) |
 
 ## Supported Vehicles
@@ -149,7 +149,7 @@ For each vehicle, the plugin creates:
 
 ### Commands Not Working
 
-- Verify your 4-digit PIN is correct
+- Verify your 4-digit PIN is configured in Homebridge (all remote commands are blocked without it)
 - Check that remote commands work in the Mopar mobile app
 - Look for error messages in Homebridge logs
 

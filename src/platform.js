@@ -77,6 +77,24 @@ class MoparPlatform {
     }
   }
 
+  hasValidPin() {
+    return typeof this.pin === 'string' && /^\d{4}$/.test(this.pin);
+  }
+
+  ensurePinAvailable(commandName) {
+    if (this.hasValidPin()) {
+      return true;
+    }
+
+    this.log.warn('========================================');
+    this.log.warn('REMOTE COMMAND BLOCKED');
+    this.log.warn('========================================');
+    this.log.warn(`${commandName} requires a valid 4-digit vehicle PIN.`);
+    this.log.warn('Read-only sensors (lock status, doors, battery) will continue to update.');
+    this.log.warn('Please set the "pin" field in your Homebridge Mopar configuration and restart.');
+    return false;
+  }
+
   async initialize() {
     try {
       // Validate configuration with comprehensive validator
@@ -373,8 +391,10 @@ class MoparPlatform {
       this.log(`Restoring: ${name}`);
       accessory.context.vehicle = vehicle;
 
-      // Remove all services except AccessoryInformation
-      const servicesToRemove = accessory.services.filter((s) => s.UUID !== Service.AccessoryInformation.UUID);
+      // Remove all services except AccessoryInformation and lock mechanism
+      const servicesToRemove = accessory.services.filter(
+        (s) => s.UUID !== Service.AccessoryInformation.UUID && s.UUID !== Service.LockMechanism.UUID
+      );
       servicesToRemove.forEach((s) => {
         this.log(`Removing old service: ${s.displayName || s.subtype || 'unknown'}`);
         accessory.removeService(s);
@@ -383,11 +403,12 @@ class MoparPlatform {
       // Initialize default states
       accessory.context.lockCurrentState = Characteristic.LockCurrentState.UNKNOWN;
       accessory.context.lockTargetState = Characteristic.LockTargetState.UNSECURED;
-      accessory.context.unlockCurrentState = Characteristic.LockCurrentState.UNKNOWN;
-      accessory.context.unlockTargetState = Characteristic.LockTargetState.SECURED;
       accessory.context.startEngineState = false;
       accessory.context.stopEngineState = true;
     }
+
+    accessory.context.lastLockCall = 0;
+    accessory.context.lastUnlockCall = 0;
 
     // Set accessory information
     const infoService = accessory.getService(Service.AccessoryInformation);
@@ -418,101 +439,59 @@ class MoparPlatform {
   configureLockService(accessory, vehicle) {
     const name = vehicle.title || `${vehicle.year} ${vehicle.make} ${vehicle.model}`;
 
-    // Lock service
     const lockDisplayName = `${name} Lock`;
-    const lockService = accessory.addService(Service.LockMechanism, lockDisplayName, vehicle.vin + '-lock');
+    let lockService = accessory.getServiceById(Service.LockMechanism, `${vehicle.vin}-lock`);
+    if (!lockService) {
+      lockService = accessory.addService(Service.LockMechanism, lockDisplayName, `${vehicle.vin}-lock`);
+    }
 
-    lockService.getCharacteristic(Characteristic.LockCurrentState).onGet(() => {
-      return accessory.context.lockCurrentState || Characteristic.LockCurrentState.UNKNOWN;
-    });
+    const updateStateCharacteristics = () => {
+      const currentState = accessory.context.lockCurrentState ?? Characteristic.LockCurrentState.UNKNOWN;
+      const targetState = accessory.context.lockTargetState ?? Characteristic.LockTargetState.UNSECURED;
+      lockService.updateCharacteristic(Characteristic.LockCurrentState, currentState);
+      lockService.updateCharacteristic(Characteristic.LockTargetState, targetState);
+    };
+
+    lockService
+      .getCharacteristic(Characteristic.LockCurrentState)
+      .onGet(() => accessory.context.lockCurrentState ?? Characteristic.LockCurrentState.UNKNOWN);
 
     lockService
       .getCharacteristic(Characteristic.LockTargetState)
-      .onGet(() => {
-        return accessory.context.lockTargetState || Characteristic.LockTargetState.UNSECURED;
-      })
-      .onSet(async (value) => {
-        if (value === Characteristic.LockTargetState.SECURED) {
-          // Prevent duplicate calls
-          const now = Date.now();
-          const lastCall = accessory.context.lastLockCall || 0;
-          if (now - lastCall < 10000) {
-            this.log('Ignoring duplicate lock command (within 10s)');
-            return;
-          }
-          accessory.context.lastLockCall = now;
+      .onGet(() => accessory.context.lockTargetState ?? Characteristic.LockTargetState.UNSECURED)
+      .onSet(async (targetState) => {
+        const isLocking = targetState === Characteristic.LockTargetState.SECURED;
+        const desiredAction = isLocking ? 'LOCK' : 'UNLOCK';
 
-          accessory.context.lockTargetState = value;
-          accessory.context.lockCurrentState = Characteristic.LockCurrentState.UNKNOWN;
-
-          const success = await this.sendCommand(vehicle.vin, 'LOCK');
-          if (success) {
-            accessory.context.lockCurrentState = Characteristic.LockCurrentState.SECURED;
-            setTimeout(() => {
-              accessory.context.lockTargetState = Characteristic.LockTargetState.UNSECURED;
-              accessory.context.lockCurrentState = Characteristic.LockCurrentState.UNKNOWN;
-              lockService.updateCharacteristic(
-                Characteristic.LockCurrentState,
-                Characteristic.LockCurrentState.UNKNOWN
-              );
-              lockService.updateCharacteristic(
-                Characteristic.LockTargetState,
-                Characteristic.LockTargetState.UNSECURED
-              );
-            }, 3000);
-          } else {
-            accessory.context.lockTargetState = Characteristic.LockTargetState.UNSECURED;
-            lockService.updateCharacteristic(Characteristic.LockTargetState, Characteristic.LockTargetState.UNSECURED);
-          }
+        const now = Date.now();
+        const lastCallKey = isLocking ? 'lastLockCall' : 'lastUnlockCall';
+        const lastCall = accessory.context[lastCallKey] || 0;
+        if (now - lastCall < 10000) {
+          this.log(`Ignoring duplicate ${desiredAction.toLowerCase()} command (within 10s)`);
+          throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.RESOURCE_BUSY);
         }
-      });
+        accessory.context[lastCallKey] = now;
 
-    // Unlock service
-    const unlockDisplayName = `${name} Unlock`;
-    const unlockService = accessory.addService(Service.LockMechanism, unlockDisplayName, vehicle.vin + '-unlock');
+        accessory.context.lockTargetState = targetState;
+        accessory.context.lockCurrentState = Characteristic.LockCurrentState.UNKNOWN;
+        updateStateCharacteristics();
 
-    unlockService.getCharacteristic(Characteristic.LockCurrentState).onGet(() => {
-      return accessory.context.unlockCurrentState || Characteristic.LockCurrentState.UNKNOWN;
-    });
-
-    unlockService
-      .getCharacteristic(Characteristic.LockTargetState)
-      .onGet(() => {
-        return accessory.context.unlockTargetState || Characteristic.LockTargetState.SECURED;
-      })
-      .onSet(async (value) => {
-        if (value === Characteristic.LockTargetState.UNSECURED) {
-          // Prevent duplicate calls
-          const now = Date.now();
-          const lastCall = accessory.context.lastUnlockCall || 0;
-          if (now - lastCall < 10000) {
-            this.log('Ignoring duplicate unlock command (within 10s)');
-            return;
-          }
-          accessory.context.lastUnlockCall = now;
-
-          accessory.context.unlockTargetState = value;
-          accessory.context.unlockCurrentState = Characteristic.LockCurrentState.UNKNOWN;
-
-          const success = await this.sendCommand(vehicle.vin, 'UNLOCK');
-          if (success) {
-            accessory.context.unlockCurrentState = Characteristic.LockCurrentState.UNSECURED;
-            setTimeout(() => {
-              accessory.context.unlockTargetState = Characteristic.LockTargetState.SECURED;
-              accessory.context.unlockCurrentState = Characteristic.LockCurrentState.UNKNOWN;
-              unlockService.updateCharacteristic(
-                Characteristic.LockCurrentState,
-                Characteristic.LockCurrentState.UNKNOWN
-              );
-              unlockService.updateCharacteristic(
-                Characteristic.LockTargetState,
-                Characteristic.LockTargetState.SECURED
-              );
-            }, 3000);
-          } else {
-            accessory.context.unlockTargetState = Characteristic.LockTargetState.SECURED;
-            unlockService.updateCharacteristic(Characteristic.LockTargetState, Characteristic.LockTargetState.SECURED);
-          }
+        const success = await this.sendCommand(vehicle.vin, desiredAction);
+        if (success) {
+          accessory.context.lockCurrentState = isLocking
+            ? Characteristic.LockCurrentState.SECURED
+            : Characteristic.LockCurrentState.UNSECURED;
+          accessory.context.lockTargetState =
+            accessory.context.lockCurrentState === Characteristic.LockCurrentState.SECURED
+              ? Characteristic.LockTargetState.SECURED
+              : Characteristic.LockTargetState.UNSECURED;
+          updateStateCharacteristics();
+        } else {
+          accessory.context.lockTargetState = isLocking
+            ? Characteristic.LockTargetState.UNSECURED
+            : Characteristic.LockTargetState.SECURED;
+          accessory.context.lockCurrentState = Characteristic.LockCurrentState.UNKNOWN;
+          updateStateCharacteristics();
         }
       });
   }
@@ -832,6 +811,10 @@ class MoparPlatform {
   }
 
   async sendCommand(vin, action) {
+    if (!this.ensurePinAvailable(`${action} command`)) {
+      return false;
+    }
+
     // Check rate limit
     const commandType = action.toLowerCase();
     const rateLimitCheck = this.rateLimiter.canExecute(commandType, vin);
@@ -866,6 +849,10 @@ class MoparPlatform {
   }
 
   async startEngine(vin) {
+    if (!this.ensurePinAvailable('Remote start')) {
+      return false;
+    }
+
     // Check rate limit
     const rateLimitCheck = this.rateLimiter.canExecute('start', vin);
 
@@ -904,6 +891,10 @@ class MoparPlatform {
   }
 
   async stopEngine(vin) {
+    if (!this.ensurePinAvailable('Remote stop')) {
+      return false;
+    }
+
     // Check rate limit
     const rateLimitCheck = this.rateLimiter.canExecute('stop', vin);
 
@@ -933,6 +924,10 @@ class MoparPlatform {
   }
 
   async hornAndLights(vin) {
+    if (!this.ensurePinAvailable('Horn & lights')) {
+      return false;
+    }
+
     // Check rate limit
     const rateLimitCheck = this.rateLimiter.canExecute('hornLights', vin);
 
@@ -958,6 +953,10 @@ class MoparPlatform {
   }
 
   async setClimate(vin, temperature) {
+    if (!this.ensurePinAvailable('Climate control')) {
+      return false;
+    }
+
     // Check rate limit
     const rateLimitCheck = this.rateLimiter.canExecute('climate', vin);
 
@@ -1001,7 +1000,7 @@ class MoparPlatform {
           accessory.context.doorStatus = status.doorStatus;
 
           // Update contact sensors
-          const frontLeftDoor = accessory.getService('door-fl');
+          const frontLeftDoor = accessory.getServiceById(Service.ContactSensor, 'door-fl');
           if (frontLeftDoor) {
             frontLeftDoor.updateCharacteristic(
               Characteristic.ContactSensorState,
@@ -1011,7 +1010,7 @@ class MoparPlatform {
             );
           }
 
-          const frontRightDoor = accessory.getService('door-fr');
+          const frontRightDoor = accessory.getServiceById(Service.ContactSensor, 'door-fr');
           if (frontRightDoor) {
             frontRightDoor.updateCharacteristic(
               Characteristic.ContactSensorState,
@@ -1021,7 +1020,7 @@ class MoparPlatform {
             );
           }
 
-          const rearLeftDoor = accessory.getService('door-rl');
+          const rearLeftDoor = accessory.getServiceById(Service.ContactSensor, 'door-rl');
           if (rearLeftDoor) {
             rearLeftDoor.updateCharacteristic(
               Characteristic.ContactSensorState,
@@ -1031,7 +1030,7 @@ class MoparPlatform {
             );
           }
 
-          const rearRightDoor = accessory.getService('door-rr');
+          const rearRightDoor = accessory.getServiceById(Service.ContactSensor, 'door-rr');
           if (rearRightDoor) {
             rearRightDoor.updateCharacteristic(
               Characteristic.ContactSensorState,
@@ -1041,7 +1040,7 @@ class MoparPlatform {
             );
           }
 
-          const trunk = accessory.getService('trunk');
+          const trunk = accessory.getServiceById(Service.ContactSensor, 'trunk');
           if (trunk) {
             trunk.updateCharacteristic(
               Characteristic.ContactSensorState,
@@ -1075,14 +1074,18 @@ class MoparPlatform {
               ? Characteristic.LockCurrentState.SECURED
               : Characteristic.LockCurrentState.UNSECURED;
 
-          const lockService = accessory.getServiceById(Service.LockMechanism, vehicle.vin + '-lock');
+          const targetState =
+            currentState === Characteristic.LockCurrentState.SECURED
+              ? Characteristic.LockTargetState.SECURED
+              : Characteristic.LockTargetState.UNSECURED;
+
+          accessory.context.lockCurrentState = currentState;
+          accessory.context.lockTargetState = targetState;
+
+          const lockService = accessory.getServiceById(Service.LockMechanism, `${vehicle.vin}-lock`);
           if (lockService) {
             lockService.updateCharacteristic(Characteristic.LockCurrentState, currentState);
-          }
-
-          const unlockService = accessory.getServiceById(Service.LockMechanism, vehicle.vin + '-unlock');
-          if (unlockService) {
-            unlockService.updateCharacteristic(Characteristic.LockCurrentState, currentState);
+            lockService.updateCharacteristic(Characteristic.LockTargetState, targetState);
           }
         }
 

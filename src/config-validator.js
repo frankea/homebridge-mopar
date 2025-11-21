@@ -37,8 +37,10 @@ class ConfigValidator {
       }
     }
 
-    // PIN validation (optional field)
-    if (config.pin && !/^\d{4}$/.test(config.pin)) {
+    // PIN validation (required)
+    if (!config.pin) {
+      errors.push('4-digit vehicle PIN is required for remote commands');
+    } else if (!/^\d{4}$/.test(config.pin)) {
       errors.push('PIN must be exactly 4 digits (e.g. "1234")');
     }
 
