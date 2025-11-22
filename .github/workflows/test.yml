@@ -2,7 +2,9 @@ name: Test
 
 on:
   push:
-    branches: [ latest, main ]
+    # Run this workflow on every branch so required checks don't fail without executing
+    branches:
+      - '**'
   pull_request:
     branches: [ latest, main ]
 
