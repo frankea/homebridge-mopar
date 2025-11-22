@@ -9,6 +9,8 @@ const fs = require('fs').promises;
 const path = require('path');
 const MoparAuth = require('./auth');
 const MoparAPI = require('./api');
+const ConfigValidator = require('./config-validator');
+const RateLimiter = require('./rate-limiter');
 
 const PLATFORM_NAME = 'Mopar';
 const PLUGIN_NAME = 'homebridge-mopar';
@@ -41,6 +43,9 @@ class MoparPlatform {
     this.auth = null;
     this.moparAPI = null;
 
+    // Rate limiter for API protection
+    this.rateLimiter = new RateLimiter();
+
     // Login mutex to prevent concurrent authentication attempts
     this.loginInProgress = false;
     this.loginPromise = null;
@@ -72,22 +77,40 @@ class MoparPlatform {
     }
   }
 
+  hasValidPin() {
+    return typeof this.pin === 'string' && /^\d{4}$/.test(this.pin);
+  }
+
+  ensurePinAvailable(commandName) {
+    if (this.hasValidPin()) {
+      return true;
+    }
+
+    this.log.warn('========================================');
+    this.log.warn('REMOTE COMMAND BLOCKED');
+    this.log.warn('========================================');
+    this.log.warn(`${commandName} requires a valid 4-digit vehicle PIN.`);
+    this.log.warn('Read-only sensors (lock status, doors, battery) will continue to update.');
+    this.log.warn('Please set the "pin" field in your Homebridge Mopar configuration and restart.');
+    return false;
+  }
+
   async initialize() {
     try {
-      // Validate configuration
-      if (!this.email || !this.password) {
-        this.log.error('========================================');
-        this.log.error('EMAIL AND PASSWORD REQUIRED!');
-        this.log.error('========================================');
-        this.log.error('Please configure your Mopar.com credentials in config.json');
-        this.log.error('Example:');
+      // Validate configuration with comprehensive validator
+      const validation = ConfigValidator.validate(this.config);
+
+      if (!validation.valid) {
+        ConfigValidator.logErrors(validation.errors, this.log);
+        this.log.error('');
+        this.log.error('Example configuration:');
         this.log.error('{');
         this.log.error('  "platform": "Mopar",');
+        this.log.error('  "name": "Mopar",');
         this.log.error('  "email": "your-email@example.com",');
         this.log.error('  "password": "your-password",');
         this.log.error('  "pin": "1234"');
         this.log.error('}');
-        this.log.error('========================================');
         return;
       }
 
@@ -120,8 +143,38 @@ class MoparPlatform {
       // Schedule cookie refresh (every 20 hours)
       this.scheduleCookieRefresh();
     } catch (error) {
-      this.log.error('Initialization failed:', error.message);
-      this.log.error('Please check your credentials and try restarting Homebridge');
+      // User-friendly error messages
+      if (error.message.includes('Cannot reach Mopar.com') || error.code === 'ENOTFOUND') {
+        this.log.error('========================================');
+        this.log.error('CANNOT REACH MOPAR.COM');
+        this.log.error('========================================');
+        this.log.error('Please check your internet connection');
+        this.log.error('Verify you can access https://www.mopar.com in your browser');
+      } else if (error.message.includes('Login failed') || error.message.includes('credentials')) {
+        this.log.error('========================================');
+        this.log.error('LOGIN FAILED');
+        this.log.error('========================================');
+        this.log.error('Please verify your Mopar.com credentials in config.json:');
+        this.log.error('- Email address must be correct');
+        this.log.error('- Password must match your Mopar.com account');
+        this.log.error('- Test login at https://www.mopar.com/en-us/sign-in.html');
+      } else if (error.message.includes('Profile request failed') || error.message.includes('Unauthorized')) {
+        this.log.error('========================================');
+        this.log.error('SESSION ERROR');
+        this.log.error('========================================');
+        this.log.error('Mopar API rejected the session');
+        this.log.error('This is usually temporary - the plugin will retry automatically');
+        this.log.error('If this persists, restart Homebridge');
+      } else {
+        this.log.error('========================================');
+        this.log.error('INITIALIZATION FAILED');
+        this.log.error('========================================');
+        this.log.error(`Error: ${error.message}`);
+        this.log.error('Please check your credentials and restart Homebridge');
+        this.log.error('Enable debug mode in config for more details');
+      }
+
+      this.debug(`Full error: ${error.stack}`);
     }
   }
 
@@ -163,7 +216,12 @@ class MoparPlatform {
         this.addVehicleAccessory(vehicle);
       });
     } catch (error) {
-      this.log.error('Failed to discover vehicles:', error.message);
+      // Use API's friendly error logging if available
+      if (this.moparAPI && this.moparAPI.logFriendlyError) {
+        this.moparAPI.logFriendlyError('Vehicle discovery', error);
+      } else {
+        this.log.error('Failed to discover vehicles:', error.message);
+      }
 
       // Try cache as last resort
       const cachedVehicles = await this.loadVehicleCache();
@@ -263,7 +321,14 @@ class MoparPlatform {
           this.log('Background refresh: API still returning empty, will retry with fresh login...');
         }
       } catch (error) {
-        this.log(`Background refresh: Failed (${error.message}), will retry with fresh login...`);
+        if (error.message.includes('Cannot reach') || error.code === 'ENOTFOUND') {
+          this.log.warn('Background refresh: Cannot reach Mopar API - Check internet connection');
+        } else if (error.message.includes('Login') || error.message.includes('credentials')) {
+          this.log.error('Background refresh: Login failed - Check your credentials');
+        } else {
+          this.log.warn(`Background refresh: Failed (${error.message}), will retry with fresh login...`);
+        }
+        this.debug(`Background refresh error: ${error.stack}`);
       }
     };
 
@@ -326,8 +391,10 @@ class MoparPlatform {
       this.log(`Restoring: ${name}`);
       accessory.context.vehicle = vehicle;
 
-      // Remove all services except AccessoryInformation
-      const servicesToRemove = accessory.services.filter((s) => s.UUID !== Service.AccessoryInformation.UUID);
+      // Remove all services except AccessoryInformation and lock mechanism
+      const servicesToRemove = accessory.services.filter(
+        (s) => s.UUID !== Service.AccessoryInformation.UUID && s.UUID !== Service.LockMechanism.UUID
+      );
       servicesToRemove.forEach((s) => {
         this.log(`Removing old service: ${s.displayName || s.subtype || 'unknown'}`);
         accessory.removeService(s);
@@ -336,11 +403,12 @@ class MoparPlatform {
       // Initialize default states
       accessory.context.lockCurrentState = Characteristic.LockCurrentState.UNKNOWN;
       accessory.context.lockTargetState = Characteristic.LockTargetState.UNSECURED;
-      accessory.context.unlockCurrentState = Characteristic.LockCurrentState.UNKNOWN;
-      accessory.context.unlockTargetState = Characteristic.LockTargetState.SECURED;
       accessory.context.startEngineState = false;
       accessory.context.stopEngineState = true;
     }
+
+    accessory.context.lastLockCall = 0;
+    accessory.context.lastUnlockCall = 0;
 
     // Set accessory information
     const infoService = accessory.getService(Service.AccessoryInformation);
@@ -371,101 +439,59 @@ class MoparPlatform {
   configureLockService(accessory, vehicle) {
     const name = vehicle.title || `${vehicle.year} ${vehicle.make} ${vehicle.model}`;
 
-    // Lock service
     const lockDisplayName = `${name} Lock`;
-    const lockService = accessory.addService(Service.LockMechanism, lockDisplayName, vehicle.vin + '-lock');
+    let lockService = accessory.getServiceById(Service.LockMechanism, `${vehicle.vin}-lock`);
+    if (!lockService) {
+      lockService = accessory.addService(Service.LockMechanism, lockDisplayName, `${vehicle.vin}-lock`);
+    }
 
-    lockService.getCharacteristic(Characteristic.LockCurrentState).onGet(() => {
-      return accessory.context.lockCurrentState || Characteristic.LockCurrentState.UNKNOWN;
-    });
+    const updateStateCharacteristics = () => {
+      const currentState = accessory.context.lockCurrentState ?? Characteristic.LockCurrentState.UNKNOWN;
+      const targetState = accessory.context.lockTargetState ?? Characteristic.LockTargetState.UNSECURED;
+      lockService.updateCharacteristic(Characteristic.LockCurrentState, currentState);
+      lockService.updateCharacteristic(Characteristic.LockTargetState, targetState);
+    };
+
+    lockService
+      .getCharacteristic(Characteristic.LockCurrentState)
+      .onGet(() => accessory.context.lockCurrentState ?? Characteristic.LockCurrentState.UNKNOWN);
 
     lockService
       .getCharacteristic(Characteristic.LockTargetState)
-      .onGet(() => {
-        return accessory.context.lockTargetState || Characteristic.LockTargetState.UNSECURED;
-      })
-      .onSet(async (value) => {
-        if (value === Characteristic.LockTargetState.SECURED) {
-          // Prevent duplicate calls
-          const now = Date.now();
-          const lastCall = accessory.context.lastLockCall || 0;
-          if (now - lastCall < 10000) {
-            this.log('Ignoring duplicate lock command (within 10s)');
-            return;
-          }
-          accessory.context.lastLockCall = now;
+      .onGet(() => accessory.context.lockTargetState ?? Characteristic.LockTargetState.UNSECURED)
+      .onSet(async (targetState) => {
+        const isLocking = targetState === Characteristic.LockTargetState.SECURED;
+        const desiredAction = isLocking ? 'LOCK' : 'UNLOCK';
 
-          accessory.context.lockTargetState = value;
-          accessory.context.lockCurrentState = Characteristic.LockCurrentState.UNKNOWN;
-
-          const success = await this.sendCommand(vehicle.vin, 'LOCK');
-          if (success) {
-            accessory.context.lockCurrentState = Characteristic.LockCurrentState.SECURED;
-            setTimeout(() => {
-              accessory.context.lockTargetState = Characteristic.LockTargetState.UNSECURED;
-              accessory.context.lockCurrentState = Characteristic.LockCurrentState.UNKNOWN;
-              lockService.updateCharacteristic(
-                Characteristic.LockCurrentState,
-                Characteristic.LockCurrentState.UNKNOWN
-              );
-              lockService.updateCharacteristic(
-                Characteristic.LockTargetState,
-                Characteristic.LockTargetState.UNSECURED
-              );
-            }, 3000);
-          } else {
-            accessory.context.lockTargetState = Characteristic.LockTargetState.UNSECURED;
-            lockService.updateCharacteristic(Characteristic.LockTargetState, Characteristic.LockTargetState.UNSECURED);
-          }
+        const now = Date.now();
+        const lastCallKey = isLocking ? 'lastLockCall' : 'lastUnlockCall';
+        const lastCall = accessory.context[lastCallKey] || 0;
+        if (now - lastCall < 10000) {
+          this.log(`Ignoring duplicate ${desiredAction.toLowerCase()} command (within 10s)`);
+          throw new this.api.hap.HapStatusError(this.api.hap.HAPStatus.RESOURCE_BUSY);
         }
-      });
+        accessory.context[lastCallKey] = now;
 
-    // Unlock service
-    const unlockDisplayName = `${name} Unlock`;
-    const unlockService = accessory.addService(Service.LockMechanism, unlockDisplayName, vehicle.vin + '-unlock');
+        accessory.context.lockTargetState = targetState;
+        accessory.context.lockCurrentState = Characteristic.LockCurrentState.UNKNOWN;
+        updateStateCharacteristics();
 
-    unlockService.getCharacteristic(Characteristic.LockCurrentState).onGet(() => {
-      return accessory.context.unlockCurrentState || Characteristic.LockCurrentState.UNKNOWN;
-    });
-
-    unlockService
-      .getCharacteristic(Characteristic.LockTargetState)
-      .onGet(() => {
-        return accessory.context.unlockTargetState || Characteristic.LockTargetState.SECURED;
-      })
-      .onSet(async (value) => {
-        if (value === Characteristic.LockTargetState.UNSECURED) {
-          // Prevent duplicate calls
-          const now = Date.now();
-          const lastCall = accessory.context.lastUnlockCall || 0;
-          if (now - lastCall < 10000) {
-            this.log('Ignoring duplicate unlock command (within 10s)');
-            return;
-          }
-          accessory.context.lastUnlockCall = now;
-
-          accessory.context.unlockTargetState = value;
-          accessory.context.unlockCurrentState = Characteristic.LockCurrentState.UNKNOWN;
-
-          const success = await this.sendCommand(vehicle.vin, 'UNLOCK');
-          if (success) {
-            accessory.context.unlockCurrentState = Characteristic.LockCurrentState.UNSECURED;
-            setTimeout(() => {
-              accessory.context.unlockTargetState = Characteristic.LockTargetState.SECURED;
-              accessory.context.unlockCurrentState = Characteristic.LockCurrentState.UNKNOWN;
-              unlockService.updateCharacteristic(
-                Characteristic.LockCurrentState,
-                Characteristic.LockCurrentState.UNKNOWN
-              );
-              unlockService.updateCharacteristic(
-                Characteristic.LockTargetState,
-                Characteristic.LockTargetState.SECURED
-              );
-            }, 3000);
-          } else {
-            accessory.context.unlockTargetState = Characteristic.LockTargetState.SECURED;
-            unlockService.updateCharacteristic(Characteristic.LockTargetState, Characteristic.LockTargetState.SECURED);
-          }
+        const success = await this.sendCommand(vehicle.vin, desiredAction);
+        if (success) {
+          accessory.context.lockCurrentState = isLocking
+            ? Characteristic.LockCurrentState.SECURED
+            : Characteristic.LockCurrentState.UNSECURED;
+          accessory.context.lockTargetState =
+            accessory.context.lockCurrentState === Characteristic.LockCurrentState.SECURED
+              ? Characteristic.LockTargetState.SECURED
+              : Characteristic.LockTargetState.UNSECURED;
+          updateStateCharacteristics();
+        } else {
+          accessory.context.lockTargetState = isLocking
+            ? Characteristic.LockTargetState.UNSECURED
+            : Characteristic.LockTargetState.SECURED;
+          accessory.context.lockCurrentState = Characteristic.LockCurrentState.UNKNOWN;
+          updateStateCharacteristics();
         }
       });
   }
@@ -785,6 +811,25 @@ class MoparPlatform {
   }
 
   async sendCommand(vin, action) {
+    if (!this.ensurePinAvailable(`${action} command`)) {
+      return false;
+    }
+
+    // Check rate limit
+    const commandType = action.toLowerCase();
+    const rateLimitCheck = this.rateLimiter.canExecute(commandType, vin);
+
+    if (!rateLimitCheck.allowed) {
+      this.log.warn('========================================');
+      this.log.warn('RATE LIMIT EXCEEDED');
+      this.log.warn('========================================');
+      this.log.warn(`${action} command blocked to protect your Mopar account`);
+      this.log.warn(`Limit: ${rateLimitCheck.limit}`);
+      this.log.warn(`Please wait ${rateLimitCheck.waitMinutes} minute(s) before trying again`);
+      this.log.warn('This prevents Mopar from blocking your account for excessive API use');
+      return false;
+    }
+
     return this.executeCommandWithRetry(action, async () => {
       this.log(`Sending ${action} to ${vin}...`);
 
@@ -804,6 +849,24 @@ class MoparPlatform {
   }
 
   async startEngine(vin) {
+    if (!this.ensurePinAvailable('Remote start')) {
+      return false;
+    }
+
+    // Check rate limit
+    const rateLimitCheck = this.rateLimiter.canExecute('start', vin);
+
+    if (!rateLimitCheck.allowed) {
+      this.log.warn('========================================');
+      this.log.warn('RATE LIMIT EXCEEDED');
+      this.log.warn('========================================');
+      this.log.warn('Remote start blocked to protect your Mopar account');
+      this.log.warn(`Limit: ${rateLimitCheck.limit}`);
+      this.log.warn(`Please wait ${rateLimitCheck.waitMinutes} minute(s) before trying again`);
+      this.log.warn('Excessive remote starts can drain battery and may trigger account restrictions');
+      return false;
+    }
+
     const accessory = this.accessories.find((acc) => acc.context.vehicle.vin === vin);
 
     return this.executeCommandWithRetry('Engine START', async () => {
@@ -828,6 +891,18 @@ class MoparPlatform {
   }
 
   async stopEngine(vin) {
+    if (!this.ensurePinAvailable('Remote stop')) {
+      return false;
+    }
+
+    // Check rate limit
+    const rateLimitCheck = this.rateLimiter.canExecute('stop', vin);
+
+    if (!rateLimitCheck.allowed) {
+      this.log.warn(`Stop engine command rate limited - please wait ${rateLimitCheck.waitMinutes} minute(s)`);
+      return false;
+    }
+
     const accessory = this.accessories.find((acc) => acc.context.vehicle.vin === vin);
 
     return this.executeCommandWithRetry('Engine STOP', async () => {
@@ -849,6 +924,19 @@ class MoparPlatform {
   }
 
   async hornAndLights(vin) {
+    if (!this.ensurePinAvailable('Horn & lights')) {
+      return false;
+    }
+
+    // Check rate limit
+    const rateLimitCheck = this.rateLimiter.canExecute('hornLights', vin);
+
+    if (!rateLimitCheck.allowed) {
+      this.log.warn(`Horn and lights command rate limited - please wait ${rateLimitCheck.waitMinutes} minute(s)`);
+      this.log.warn(`Limit: ${rateLimitCheck.limit}`);
+      return false;
+    }
+
     return this.executeCommandWithRetry('Horn and Lights', async () => {
       this.log(`Activating horn and lights for ${vin}...`);
       const serviceRequestId = await this.moparAPI.hornAndLights(vin);
@@ -865,6 +953,19 @@ class MoparPlatform {
   }
 
   async setClimate(vin, temperature) {
+    if (!this.ensurePinAvailable('Climate control')) {
+      return false;
+    }
+
+    // Check rate limit
+    const rateLimitCheck = this.rateLimiter.canExecute('climate', vin);
+
+    if (!rateLimitCheck.allowed) {
+      this.log.warn(`Climate control command rate limited - please wait ${rateLimitCheck.waitMinutes} minute(s)`);
+      this.log.warn(`Limit: ${rateLimitCheck.limit}`);
+      return false;
+    }
+
     return this.executeCommandWithRetry('Climate Control', async () => {
       this.log(`Setting climate to ${temperature}°F for ${vin}...`);
       const serviceRequestId = await this.moparAPI.setClimate(vin, this.pin, temperature);
@@ -899,7 +1000,7 @@ class MoparPlatform {
           accessory.context.doorStatus = status.doorStatus;
 
           // Update contact sensors
-          const frontLeftDoor = accessory.getService('door-fl');
+          const frontLeftDoor = accessory.getServiceById(Service.ContactSensor, 'door-fl');
           if (frontLeftDoor) {
             frontLeftDoor.updateCharacteristic(
               Characteristic.ContactSensorState,
@@ -909,7 +1010,7 @@ class MoparPlatform {
             );
           }
 
-          const frontRightDoor = accessory.getService('door-fr');
+          const frontRightDoor = accessory.getServiceById(Service.ContactSensor, 'door-fr');
           if (frontRightDoor) {
             frontRightDoor.updateCharacteristic(
               Characteristic.ContactSensorState,
@@ -919,7 +1020,7 @@ class MoparPlatform {
             );
           }
 
-          const rearLeftDoor = accessory.getService('door-rl');
+          const rearLeftDoor = accessory.getServiceById(Service.ContactSensor, 'door-rl');
           if (rearLeftDoor) {
             rearLeftDoor.updateCharacteristic(
               Characteristic.ContactSensorState,
@@ -929,7 +1030,7 @@ class MoparPlatform {
             );
           }
 
-          const rearRightDoor = accessory.getService('door-rr');
+          const rearRightDoor = accessory.getServiceById(Service.ContactSensor, 'door-rr');
           if (rearRightDoor) {
             rearRightDoor.updateCharacteristic(
               Characteristic.ContactSensorState,
@@ -939,7 +1040,7 @@ class MoparPlatform {
             );
           }
 
-          const trunk = accessory.getService('trunk');
+          const trunk = accessory.getServiceById(Service.ContactSensor, 'trunk');
           if (trunk) {
             trunk.updateCharacteristic(
               Characteristic.ContactSensorState,
@@ -973,14 +1074,18 @@ class MoparPlatform {
               ? Characteristic.LockCurrentState.SECURED
               : Characteristic.LockCurrentState.UNSECURED;
 
-          const lockService = accessory.getServiceById(Service.LockMechanism, vehicle.vin + '-lock');
+          const targetState =
+            currentState === Characteristic.LockCurrentState.SECURED
+              ? Characteristic.LockTargetState.SECURED
+              : Characteristic.LockTargetState.UNSECURED;
+
+          accessory.context.lockCurrentState = currentState;
+          accessory.context.lockTargetState = targetState;
+
+          const lockService = accessory.getServiceById(Service.LockMechanism, `${vehicle.vin}-lock`);
           if (lockService) {
             lockService.updateCharacteristic(Characteristic.LockCurrentState, currentState);
-          }
-
-          const unlockService = accessory.getServiceById(Service.LockMechanism, vehicle.vin + '-unlock');
-          if (unlockService) {
-            unlockService.updateCharacteristic(Characteristic.LockCurrentState, currentState);
+            lockService.updateCharacteristic(Characteristic.LockTargetState, targetState);
           }
         }
 
@@ -1062,7 +1167,15 @@ class MoparPlatform {
 
         await this.loginPromise;
       } catch (error) {
-        this.log.error('Session refresh failed:', error.message);
+        if (error.message.includes('Cannot reach') || error.code === 'ENOTFOUND') {
+          this.log.warn('Session refresh failed: Cannot reach Mopar.com - Will retry later');
+        } else if (error.message.includes('timeout')) {
+          this.log.warn('Session refresh timed out - Mopar.com may be slow, will retry later');
+        } else {
+          this.log.error('Session refresh failed:', error.message);
+          this.log.error('Your next command will trigger a fresh login');
+        }
+        this.debug(`Session refresh error: ${error.stack}`);
         this.loginInProgress = false;
         this.loginPromise = null;
       }
@@ -1101,7 +1214,15 @@ class MoparPlatform {
 
         await this.loginPromise;
       } catch (error) {
-        this.log.error('Cookie refresh failed:', error.message);
+        if (error.message.includes('Cannot reach') || error.code === 'ENOTFOUND') {
+          this.log.warn('Cookie refresh failed: Cannot reach Mopar.com - Will retry in 20 hours');
+        } else if (error.message.includes('timeout')) {
+          this.log.warn('Cookie refresh timed out - Will retry in 20 hours');
+        } else {
+          this.log.error('Cookie refresh failed:', error.message);
+          this.log.error('Your next command will trigger a fresh login if needed');
+        }
+        this.debug(`Cookie refresh error: ${error.stack}`);
         this.loginInProgress = false;
         this.loginPromise = null;
       }

@@ -14,10 +14,11 @@ coverage/
 .github
 
 # VSCode and IDE
-.vscode
-.idea
-.claude
-.cursor
+.vscode/
+.idea/
+.claude/
+.cursor/
+.cursorrules/
 
 # Development tools
 nodemon.json

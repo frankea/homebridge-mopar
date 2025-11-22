@@ -103,22 +103,38 @@ class MoparAPI {
       await this.getProfile();
       this.log('Profile initialized');
     } catch (e) {
-      this.log.error(`Failed to initialize profile: ${e.message}`);
+      this.log(`ERROR: Failed to initialize profile: ${e.message}`);
       this.debug('This usually means the session cookies are invalid or expired');
       throw e; // Re-throw so caller knows initialization failed
     }
   }
 
-  async getCSRFToken() {
-    const response = await this.session.get(`${this.baseURL}/moparsvc/token`, {
-      headers: {
-        Referer: 'https://www.mopar.com/chrysler/en-us/my-vehicle/dashboard.html',
-      },
-    });
-    this.csrfToken = response.data.token;
-    this.csrfTokenTimestamp = Date.now();
-    this.debug(`CSRF token refreshed: ${this.csrfToken?.substring(0, 20)}...`);
-    return this.csrfToken;
+  async getCSRFToken(maxAttempts = 2, retryDelayMs = 750) {
+    const tokenUrl = `${this.baseURL}/moparsvc/token`;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const response = await this.session.get(tokenUrl, {
+          headers: {
+            Referer: 'https://www.mopar.com/chrysler/en-us/my-vehicle/dashboard.html',
+          },
+        });
+        this.csrfToken = response.data.token;
+        this.csrfTokenTimestamp = Date.now();
+        this.debug(`CSRF token refreshed: ${this.csrfToken?.substring(0, 20)}...`);
+        return this.csrfToken;
+      } catch (error) {
+        if (attempt >= maxAttempts) {
+          this.log(`ERROR: Failed to refresh CSRF token after ${attempt} attempts: ${error.message}`);
+          throw error;
+        }
+
+        this.log(`WARNING: CSRF token fetch failed (attempt ${attempt}): ${error.message}. Retrying...`);
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+      }
+    }
+
+    return null;
   }
 
   /**
@@ -141,25 +157,50 @@ class MoparAPI {
 
   async getProfile() {
     const url = `${this.baseURL}/moparsvc/user/getProfile`;
-    const timestamp = Date.now();
 
-    const response = await this.session.get(`${url}?timestamp=${timestamp}`, {
-      headers: {
-        Referer: 'https://www.mopar.com/chrysler/en-us/my-vehicle/dashboard.html',
-        Accept: 'application/json',
-        'X-Requested-With': 'XMLHttpRequest',
-      },
-    });
+    // Retry logic: Mopar backend sometimes returns 403 immediately after login
+    // The session needs a few seconds to fully propagate
+    const maxRetries = 3;
+    const retryDelay = 3000; // 3 seconds between retries
 
-    this.debug(`Profile loaded: ${JSON.stringify(response.data).substring(0, 200)}`);
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      if (attempt > 1) {
+        this.debug(`Profile retry attempt ${attempt}/${maxRetries} after ${retryDelay}ms delay...`);
+        await new Promise((resolve) => setTimeout(resolve, retryDelay));
+      }
 
-    // Check for error response
-    if (response.data && (response.data.status === 'failed' || response.data.errorCode)) {
-      const errorMsg = response.data.errorDesc || response.data.msg || 'Unknown error';
-      throw new Error(`Profile request failed: ${errorMsg} (${response.data.errorCode || 'no code'})`);
+      const timestamp = Date.now();
+      const response = await this.session.get(`${url}?timestamp=${timestamp}`, {
+        headers: {
+          Referer: 'https://www.mopar.com/chrysler/en-us/my-vehicle/dashboard.html',
+          Accept: 'application/json',
+          'X-Requested-With': 'XMLHttpRequest',
+        },
+      });
+
+      this.debug(`Profile loaded (attempt ${attempt}): ${JSON.stringify(response.data).substring(0, 200)}`);
+
+      // Check for error response
+      if (response.data && (response.data.status === 'failed' || response.data.errorCode)) {
+        const errorMsg = response.data.errorDesc || response.data.msg || 'Unknown error';
+        const errorCode = response.data.errorCode || 'no code';
+
+        // If it's a 403 and we have retries left, continue to retry
+        if (errorCode === '403' && attempt < maxRetries) {
+          this.debug(`Profile returned 403 on attempt ${attempt}, will retry...`);
+          continue;
+        }
+
+        // Out of retries or different error - throw
+        throw new Error(`Profile request failed: ${errorMsg} (${errorCode})`);
+      }
+
+      // Success!
+      return response.data;
     }
 
-    return response.data;
+    // Should never reach here, but just in case
+    throw new Error('Profile request failed after all retries');
   }
 
   /**
@@ -278,11 +319,140 @@ class MoparAPI {
   }
 
   /**
-   * NOTE: Currently returns stub - real-time status updates planned for future
-   * Get current vehicle status (doors, locks, engine, etc.)
+   * Get current vehicle status (doors, locks, engine, battery, etc.)
+   * @param {string} vin - Vehicle identification number
+   * @param {boolean} refresh - Whether to refresh status from vehicle first
+   * @returns {object} Vehicle status object
    */
-  async getVehicleStatus(_vin) {
-    return { available: false, error: 'Real-time status requires vehicle wakeup' };
+  async getVehicleStatus(vin, refresh = false) {
+    try {
+      // Optionally refresh status from vehicle (wakes up vehicle)
+      if (refresh) {
+        this.debug(`Refreshing status from vehicle ${vin}...`);
+        await this.refreshVehicleStatus(vin);
+
+        // Wait for refresh to complete
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+      }
+
+      // Try to get vehicle health report (VHR)
+      const vhrData = await this.getVehicleHealth(vin);
+
+      if (vhrData && vhrData.available !== false) {
+        // Parse VHR data into status object
+        const status = this.parseVHRData(vhrData);
+        return { available: true, ...status };
+      }
+
+      // If VHR not available, try to get basic status from vehicle list
+      const vehicles = await this.getVehiclesQuick();
+      const vehicle = vehicles.find((v) => v.vin === vin);
+
+      if (vehicle) {
+        return {
+          available: true,
+          lockStatus: vehicle.lockStatus || 'UNKNOWN',
+          doorStatus: this.parseDoorStatus(vehicle),
+          batteryLevel: this.parseBatteryLevel(vehicle),
+          engineRunning: vehicle.engineRunning || false,
+          odometer: vehicle.odometer,
+          fuelLevel: vehicle.fuelLevel,
+        };
+      }
+
+      // No status data available
+      return { available: false, error: 'No status data available for this vehicle' };
+    } catch (error) {
+      this.debug(`Failed to get vehicle status: ${error.message}`);
+      return { available: false, error: error.message };
+    }
+  }
+
+  /**
+   * Parse Vehicle Health Report data into standardized status
+   * @param {object} vhrData - Raw VHR data from API
+   * @returns {object} Parsed status object
+   */
+  parseVHRData(vhrData) {
+    const status = {};
+
+    // Extract door status if available
+    if (vhrData.doors) {
+      status.doorStatus = {
+        frontLeft: vhrData.doors.frontLeft || vhrData.doors.driverFront || 'UNKNOWN',
+        frontRight: vhrData.doors.frontRight || vhrData.doors.passengerFront || 'UNKNOWN',
+        rearLeft: vhrData.doors.rearLeft || vhrData.doors.driverRear || 'UNKNOWN',
+        rearRight: vhrData.doors.rearRight || vhrData.doors.passengerRear || 'UNKNOWN',
+        trunk: vhrData.doors.trunk || vhrData.doors.liftgate || 'UNKNOWN',
+      };
+    }
+
+    // Extract lock status
+    if (vhrData.lock !== undefined || vhrData.locked !== undefined) {
+      status.lockStatus = vhrData.locked || vhrData.lock === 'LOCKED' ? 'LOCKED' : 'UNLOCKED';
+    }
+
+    // Extract engine status
+    if (vhrData.engine !== undefined) {
+      status.engineRunning = vhrData.engine === 'RUNNING' || vhrData.engine === 'ON';
+    }
+
+    // Extract battery level
+    if (vhrData.battery !== undefined) {
+      status.batteryLevel =
+        typeof vhrData.battery === 'number' ? vhrData.battery : vhrData.battery.level || vhrData.battery.percent || 100;
+    }
+
+    // Extract odometer
+    if (vhrData.odometer !== undefined) {
+      status.odometer = vhrData.odometer;
+    }
+
+    // Extract fuel level
+    if (vhrData.fuel !== undefined) {
+      status.fuelLevel = typeof vhrData.fuel === 'number' ? vhrData.fuel : vhrData.fuel.percent || vhrData.fuel.level;
+    }
+
+    return status;
+  }
+
+  /**
+   * Parse door status from vehicle object
+   * @param {object} vehicle - Vehicle object from getVehicles
+   * @returns {object} Door status object
+   */
+  parseDoorStatus(vehicle) {
+    // Try to extract door status from various possible fields
+    if (vehicle.doors) {
+      return {
+        frontLeft: vehicle.doors.frontLeft || 'CLOSED',
+        frontRight: vehicle.doors.frontRight || 'CLOSED',
+        rearLeft: vehicle.doors.rearLeft || 'CLOSED',
+        rearRight: vehicle.doors.rearRight || 'CLOSED',
+        trunk: vehicle.doors.trunk || 'CLOSED',
+      };
+    }
+
+    // Default: all closed
+    return {
+      frontLeft: 'CLOSED',
+      frontRight: 'CLOSED',
+      rearLeft: 'CLOSED',
+      rearRight: 'CLOSED',
+      trunk: 'CLOSED',
+    };
+  }
+
+  /**
+   * Parse battery level from vehicle object
+   * @param {object} vehicle - Vehicle object from getVehicles
+   * @returns {number} Battery level percentage (0-100)
+   */
+  parseBatteryLevel(vehicle) {
+    if (vehicle.battery !== undefined) {
+      return typeof vehicle.battery === 'number' ? vehicle.battery : vehicle.battery.level || 100;
+    }
+    return 100; // Default: assume full if unknown
   }
 
   /**
@@ -459,6 +629,56 @@ class MoparAPI {
     }
 
     return { success: false, status: 'TIMEOUT' };
+  }
+
+  /**
+   * Log user-friendly error messages based on error type
+   * @param {string} operation - What was being attempted
+   * @param {Error} error - The error that occurred
+   */
+  logFriendlyError(operation, error) {
+    // Network errors
+    if (error.code === 'ENOTFOUND' || error.code === 'ECONNREFUSED') {
+      this.log('ERROR: Cannot reach Mopar API - Check your internet connection');
+      this.debug(`${operation} failed: ${error.message}`);
+    }
+    // HTTP status code errors
+    else if (error.response) {
+      const status = error.response.status;
+      const url = error.config?.url || 'unknown';
+
+      if (status === 401) {
+        this.log('ERROR: Authentication failed - Your session has expired');
+        this.log('Please wait while we re-authenticate automatically...');
+      } else if (status === 403) {
+        this.log('ERROR: Access forbidden - Session or permissions issue');
+        this.log('This usually resolves automatically on retry');
+      } else if (status === 429) {
+        this.log('ERROR: Too many requests to Mopar API');
+        this.log('Please wait a few minutes before trying again');
+      } else if (status === 500 || status === 502 || status === 503) {
+        this.log(`ERROR: Mopar server error (${status}) - Their servers may be down`);
+        this.log('This is temporary - try again in a few minutes');
+      } else if (status === 404) {
+        this.log('ERROR: API endpoint not found');
+        this.debug(`URL: ${url}`);
+      } else {
+        this.log(`ERROR: ${operation} failed with HTTP ${status}`);
+        this.debug(`URL: ${url}, Message: ${error.message}`);
+      }
+    }
+    // Request made but no response
+    else if (error.request) {
+      this.log('ERROR: No response from Mopar API - Network timeout');
+      this.log('Check your internet connection or try again later');
+    }
+    // Something else
+    else {
+      this.log(`ERROR: ${operation} failed: ${error.message}`);
+    }
+
+    // Always log full stack in debug mode
+    this.debug(`Full error: ${error.stack}`);
   }
 }
 

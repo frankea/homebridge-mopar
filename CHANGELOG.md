@@ -1,13 +1,92 @@
-# Changelog
+# Change Log
 
 All notable changes to this project will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## Unreleased
 
-## [0.9.10] - 2025-10-20
+## 0.9.14-beta.0 (2025-10-20)
+
+### Added
+- **Configuration Validator** - Comprehensive config validation with helpful error messages
+  - Email format validation
+  - Password length validation (min 8 characters)
+  - PIN format validation (exactly 4 digits)
+  - Shows all validation errors at once with numbered list
+  - Prevents initialization with invalid config
+- **Real-Time Vehicle Status** - Full implementation with VHR endpoint support
+  - Door status for all 5 doors (front left/right, rear left/right, trunk)
+  - Battery level monitoring
+  - Lock status updates
+  - Engine running status
+  - Odometer reading
+  - Fuel level tracking (when available)
+  - Automatic fallback to vehicle list when VHR unavailable
+- **Rate Limiting & API Protection** - Prevents account blocks from excessive API use
+  - Start/Stop engine: 3 per hour (protects battery)
+  - Lock/Unlock: 10 per 5 minutes
+  - Horn & Lights: 5 per 5 minutes (prevents neighbor complaints)
+  - Climate: 5 per 10 minutes
+  - Per-vehicle tracking allows multiple vehicles
+  - User-friendly warnings with wait times when limits exceeded
+- **Structured Logging System** - Consistent logging across all classes
+  - Support for error, warn, info, log, debug, and trace levels
+  - Smart detection of Homebridge logger vs simple function
+  - Proper method binding for error/warn methods
+  - Backward compatible with existing code
+- **Local-Only Metrics** - Debugging statistics (Homebridge verified compatible)
+  - **NO external calls, NO tracking, NO data transmission**
+  - Command success/failure rates and average durations
+  - API call statistics
+  - Error occurrence tracking
+  - Login and session refresh statistics
+  - Plugin uptime tracking
+  - All data stays on user's machine
+
+### Improved
+- **Better Error Handling** - User-friendly error messages throughout codebase
+  - Network errors: "Cannot reach Mopar.com - Check your internet connection"
+  - Timeout errors: "Login timed out - Mopar.com may be slow or unreachable"
+  - SSL errors: "Check your system time and date settings"
+  - HTTP 401/403/429/500 errors with specific guidance
+  - Initialization errors with clear banners and actionable steps
+  - All errors include debug stack traces when debug mode enabled
+
+### Fixed
+- CHANGELOG format updated for Homebridge UI compatibility
+  - Changed from `[X.Y.Z] - DATE` to `X.Y.Z (DATE)` format
+  - Homebridge UI can now properly parse and display changelog
+- .npmignore updated to exclude .cursorrules/ directory
+
+### Technical
+- Added 99 new tests (127 → 226 total tests)
+- New test files: config-validator.test.js, rate-limiter.test.js, logger.test.js, metrics.test.js
+- Enhanced api.test.js with vehicle status tests
+- All 226 tests passing
+
+## 0.9.13 (2025-10-20)
+
+### Fixed
+- **GitHub Actions workflow permissions** - Added `contents: write` permission to allow automated GitHub release creation
+
+### Improved
+- Releases now properly marked as beta/prerelease in GitHub
+- Release titles include "(Beta)" designation
+
+## 0.9.12 (2025-10-20)
+
+### Fixed
+- **CRITICAL:** Fixed crash in API error handling - `this.log.error is not a function`
+  - API class was calling `this.log.error()` but only had `this.log()` available
+  - Changed to `this.log('ERROR: ...')` for consistency with rest of codebase
+  - Users will now see proper error messages instead of crashes
+  - Affects initialization failures and profile API errors
+
+### Improved
+- Better error visibility when profile API returns 403 Unauthorized Access
+
+## 0.9.10 (2025-10-20)
 
 ### Fixed
 - **Session refresh reliability improvements**
@@ -23,7 +102,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added same 2-second propagation delay that initial Puppeteer login uses
 - Now both 50-minute session refresh and 20-hour cookie refresh wait for backend
 
-## [0.9.9] - 2025-10-20
+## 0.9.9 (2025-10-20)
 
 ### Improved
 - **Proactive session refresh** every 50 minutes
@@ -33,7 +112,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Background Puppeteer login runs automatically
   - Two refresh timers: 50 minutes (session) + 20 hours (cookies)
 
-## [0.9.8] - 2025-10-20
+## 0.9.8 (2025-10-20)
 
 ### Fixed
 - **CRITICAL:** Commands failing with HTTP 500 after ~1 hour
@@ -43,7 +122,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Commands automatically succeed on retry with fresh session
   - User experience: commands "just work" even with expired sessions
 
-## [0.9.7] - 2025-10-20
+## 0.9.7 (2025-10-20)
 
 ### Improved
 - Enhanced error logging for API failures (500, 400, 403 errors)
@@ -51,14 +130,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Helps diagnose Mopar API issues (500 errors, rate limiting, etc.)
   - Request body logged in debug mode for troubleshooting 400 errors
 
-## [0.9.4] - 2025-10-17
+## 0.9.4 (2025-10-17)
 
 ### Fixed
 - Missing success/failure logging for engine start/stop, horn, and climate commands
 - Users can now see if commands actually worked
 - Matches lock/unlock behavior which already had proper logging
 
-## [0.9.3] - 2025-10-17
+## 0.9.3 (2025-10-17)
 
 ### Fixed
 - **CRITICAL:** Commands failing after 16+ hours with 403/401/400 errors
@@ -67,13 +146,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Retry once with fresh session
   - Users never notice - commands just work
 
-## [0.9.2] - 2025-10-16
+## 0.9.2 (2025-10-16)
 
 ### Fixed
 - Removed ConfiguredName warnings from Homebridge logs (7 warnings eliminated)
 - Services still display with correct names, just cleaner logs
 
-## [0.9.1] - 2025-10-16
+## 0.9.1 (2025-10-16)
 
 ### Added
 - ESLint + Prettier for code quality
@@ -121,7 +200,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Excluded development files (.claude, BETA_RELEASE_SUMMARY, etc) from npm
 - Final package clean and minimal (21.6 kB, 8 files)
 
-## [0.9.0] - 2025-10-16
+## 0.9.0 (2025-10-16)
 
 ### ⚠️ Beta Release
 - Tested on 2022 Chrysler Pacifica
@@ -160,7 +239,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Status polling for command completion
 - Vehicle data persistence across restarts
 
-## [1.0.0] - TBD
+## 1.0.0 (TBD)
 
 ### Requirements for 1.0.0
 - Community testing reports from multiple vehicle models

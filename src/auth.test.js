@@ -19,6 +19,7 @@ jest.mock('puppeteer');
 const puppeteer = require('puppeteer');
 const fs = require('fs');
 const MoparAuth = require('./auth');
+const { createMockPage, createMockBrowser, mockPuppeteerLaunch } = require('../test/helpers/puppeteer');
 
 describe('MoparAuth', () => {
   let auth;
@@ -34,41 +35,9 @@ describe('MoparAuth', () => {
     mockLog.error = jest.fn();
     mockLog.warn = jest.fn();
 
-    // Mock page methods
-    mockPage = {
-      setViewport: jest.fn().mockResolvedValue(),
-      setUserAgent: jest.fn().mockResolvedValue(),
-      goto: jest.fn().mockResolvedValue(),
-      waitForSelector: jest.fn().mockResolvedValue(),
-      click: jest.fn().mockResolvedValue(),
-      type: jest.fn().mockResolvedValue(),
-      keyboard: {
-        down: jest.fn().mockResolvedValue(),
-        press: jest.fn().mockResolvedValue(),
-        up: jest.fn().mockResolvedValue(),
-      },
-      $: jest.fn().mockResolvedValue({}),
-      $eval: jest.fn(),
-      evaluate: jest.fn().mockResolvedValue({}),
-      on: jest.fn(),
-      off: jest.fn(),
-      url: jest.fn().mockReturnValue('https://www.mopar.com/chrysler/en-us/my-vehicle/dashboard.html'),
-      title: jest.fn().mockResolvedValue('Mopar Owner'),
-      cookies: jest.fn().mockResolvedValue([]),
-      screenshot: jest.fn().mockResolvedValue(),
-      content: jest.fn().mockResolvedValue('<html></html>'),
-      waitForNavigation: jest.fn().mockResolvedValue(),
-      focus: jest.fn().mockResolvedValue(),
-    };
-
-    // Mock browser
-    mockBrowser = {
-      newPage: jest.fn().mockResolvedValue(mockPage),
-      close: jest.fn().mockResolvedValue(),
-    };
-
-    // Mock puppeteer launch
-    puppeteer.launch.mockResolvedValue(mockBrowser);
+    mockPage = createMockPage({ title: jest.fn().mockResolvedValue('Mopar Owner') });
+    mockBrowser = createMockBrowser(mockPage);
+    mockPuppeteerLaunch(mockBrowser);
 
     // Mock fs
     fs.existsSync.mockReturnValue(true);

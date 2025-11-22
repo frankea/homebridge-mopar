@@ -27,6 +27,7 @@ const { wrapper } = require('axios-cookiejar-support');
 const tough = require('tough-cookie');
 const MoparAuth = require('./auth');
 const MoparAPI = require('./api');
+const { createMockPage, createMockBrowser, mockPuppeteerLaunch } = require('../test/helpers/puppeteer');
 
 describe('Integration Tests', () => {
   let mockBrowser;
@@ -43,44 +44,64 @@ describe('Integration Tests', () => {
     mockLog.warn = jest.fn();
 
     // Mock Puppeteer
-    mockPage = {
-      setViewport: jest.fn().mockResolvedValue(),
-      setUserAgent: jest.fn().mockResolvedValue(),
-      goto: jest.fn().mockResolvedValue(),
-      waitForSelector: jest.fn().mockResolvedValue(),
-      $eval: jest.fn().mockResolvedValue('test@example.com'),
-      evaluate: jest
-        .fn()
-        .mockResolvedValueOnce({}) // Form validation
-        .mockResolvedValueOnce({ method: 'enter-key', attempted: true }) // Form submission
-        .mockResolvedValueOnce({ authenticated: true, uid: 'user123' }) // Gigya session
-        .mockResolvedValueOnce({ uid: 'user123', uidSignature: 'sig', signatureTimestamp: Date.now() }) // Gigya data
-        .mockResolvedValueOnce({}), // POST form
-      cookies: jest.fn().mockResolvedValue([{ name: 'glt_test', value: 'token123', domain: '.mopar.com' }]),
-      on: jest.fn(),
-      off: jest.fn(),
-      url: jest.fn().mockReturnValue('https://www.mopar.com/chrysler/en-us/my-vehicle/dashboard.html'),
-      keyboard: {
-        down: jest.fn(),
-        press: jest.fn(),
-        up: jest.fn(),
-      },
-      focus: jest.fn(),
-      click: jest.fn(),
-      type: jest.fn(),
-      screenshot: jest.fn().mockResolvedValue(),
-      content: jest.fn().mockResolvedValue('<html></html>'),
-      title: jest.fn().mockResolvedValue('Mopar'),
-      waitForNavigation: jest.fn().mockResolvedValue(),
-      $: jest.fn().mockResolvedValue({}),
-    };
+    mockPage = createMockPage();
+    mockPage.$eval.mockResolvedValue('test@example.com');
+    mockPage.evaluate.mockImplementation((fn) => {
+      const fnStr = fn.toString();
 
-    mockBrowser = {
-      newPage: jest.fn().mockResolvedValue(mockPage),
-      close: jest.fn().mockResolvedValue(),
-    };
+      if (fnStr.includes('input[name="username"]') && fnStr.includes('value =')) {
+        return Promise.resolve();
+      }
+      if (fnStr.includes('input[name="password"]') && fnStr.includes('value =')) {
+        return Promise.resolve();
+      }
+      if (fnStr.includes('input[name="username"]') && fnStr.includes('dispatchEvent')) {
+        return Promise.resolve();
+      }
+      if (fnStr.includes('window.getComputedStyle')) {
+        return Promise.resolve({ visible: true, disabled: false, text: 'Sign In' });
+      }
+      if (fnStr.includes('el.click()')) {
+        return Promise.resolve();
+      }
+      if (fnStr.includes('gigya.accounts.login')) {
+        return Promise.resolve({ method: 'gigya-api', attempted: true, success: true });
+      }
+      if (fnStr.includes('gigya.accounts.getAccountInfo')) {
+        return Promise.resolve({
+          authenticated: true,
+          uid: 'user123',
+          uidSignature: 'sig123',
+          signatureTimestamp: Date.now(),
+          profile: { firstName: 'Test', lastName: 'User' },
+        });
+      }
+      if (fnStr.includes(':cq_csrf_token')) {
+        return Promise.resolve(null);
+      }
+      if (fnStr.includes('form.submit()') || fnStr.includes('form.action')) {
+        return Promise.resolve();
+      }
+      if (fnStr.includes('scrollTo')) {
+        return Promise.resolve();
+      }
+      return Promise.resolve({});
+    });
+    mockPage.cookies.mockResolvedValue([{ name: 'glt_test', value: 'token123', domain: '.mopar.com' }]);
+    mockPage.on = jest.fn();
+    mockPage.off = jest.fn();
+    mockPage.url.mockReturnValue('https://www.mopar.com/chrysler/en-us/my-vehicle/dashboard.html');
+    mockPage.focus = jest.fn();
+    mockPage.click = jest.fn();
+    mockPage.type = jest.fn();
+    mockPage.screenshot.mockResolvedValue();
+    mockPage.content.mockResolvedValue('<html></html>');
+    mockPage.title.mockResolvedValue('Mopar');
+    mockPage.waitForNavigation.mockResolvedValue();
+    mockPage.$.mockResolvedValue({});
 
-    puppeteer.launch.mockResolvedValue(mockBrowser);
+    mockBrowser = createMockBrowser(mockPage);
+    mockPuppeteerLaunch(mockBrowser);
 
     // Mock axios
     mockSession = {
@@ -228,13 +249,13 @@ describe('Integration Tests', () => {
   });
 
   describe('Error Recovery Scenarios', () => {
-    test('should retry API calls on network errors', async () => {
+    test('should retry on empty vehicle responses', async () => {
       mockSession.get
         .mockResolvedValueOnce({ data: { token: 'csrf123' } })
         .mockResolvedValueOnce({ data: { uid: 'user123' } })
-        .mockRejectedValueOnce(new Error('ECONNREFUSED')) // First attempt fails
-        .mockRejectedValueOnce(new Error('ECONNREFUSED')) // Second attempt fails
-        .mockRejectedValueOnce(new Error('ECONNREFUSED')) // Third attempt fails
+        .mockResolvedValueOnce({ data: [] }) // First attempt - empty
+        .mockResolvedValueOnce({ data: [] }) // Second attempt - empty
+        .mockResolvedValueOnce({ data: [] }) // Third attempt - empty
         .mockResolvedValueOnce({
           data: [{ vin: 'VIN123', make: 'DODGE', model: 'Durango' }],
         }); // Fourth attempt succeeds
@@ -245,7 +266,7 @@ describe('Integration Tests', () => {
 
       await api.initialize();
 
-      // getVehicles has built-in retry logic
+      // getVehicles has built-in retry logic for empty responses
       const vehicles = await api.getVehicles();
 
       expect(vehicles).toHaveLength(1);
@@ -262,6 +283,9 @@ describe('Integration Tests', () => {
       };
 
       const api = new MoparAPI(testCookies, mockLog);
+
+      // Verify API instance was created
+      expect(api).toBeDefined();
 
       // Verify cookies were set
       expect(mockCookieJar.setCookieSync).toHaveBeenCalledTimes(3);
@@ -369,7 +393,7 @@ describe('Integration Tests', () => {
 
       const auth = new MoparAuth('test@example.com', 'password123', mockLog);
       let cookies = await auth.login();
-      let api = new MoparAPI(cookies, mockLog);
+      const api = new MoparAPI(cookies, mockLog);
       await api.initialize();
 
       // Try command - will fail with 403
@@ -473,10 +497,14 @@ describe('Integration Tests', () => {
         return mockHomebridge.registerPlatform.mock.calls[0][2];
       })();
 
-      const platformInstance = new MoparPlatform(mockLog, { email: 'test@example.com', password: 'test' }, {
-        user: { storagePath: () => '/tmp/test' },
-        on: jest.fn(),
-      });
+      const platformInstance = new MoparPlatform(
+        mockLog,
+        { email: 'test@example.com', password: 'test' },
+        {
+          user: { storagePath: () => '/tmp/test' },
+          on: jest.fn(),
+        }
+      );
 
       // Save cache
       await platformInstance.saveVehicleCache(mockVehicles);
@@ -494,4 +522,3 @@ describe('Integration Tests', () => {
     });
   });
 });
-

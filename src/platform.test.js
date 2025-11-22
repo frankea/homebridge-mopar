@@ -9,70 +9,12 @@ jest.mock('./api');
 const MoparAuth = require('./auth');
 const MoparAPI = require('./api');
 
-// Mock Homebridge globals
-const MoparPlatform = (() => {
-  const mockHomebridge = {
-    hap: {
-      Service: class MockService {
-        static AccessoryInformation = { UUID: 'info-uuid' };
-        static LockMechanism = { UUID: 'lock-uuid' };
-        static Switch = { UUID: 'switch-uuid' };
-        static Battery = { UUID: 'battery-uuid' };
-        static ContactSensor = { UUID: 'contact-uuid' };
-      },
-      Characteristic: class MockCharacteristic {
-        static LockCurrentState = { UNKNOWN: 3, SECURED: 1, UNSECURED: 0 };
-        static LockTargetState = { SECURED: 1, UNSECURED: 0 };
-        static ContactSensorState = { CONTACT_DETECTED: 0, CONTACT_NOT_DETECTED: 1 };
-        static BatteryLevel = {};
-        static StatusLowBattery = { BATTERY_LEVEL_LOW: 1, BATTERY_LEVEL_NORMAL: 0 };
-        static ChargingState = { CHARGING: 1, NOT_CHARGING: 0 };
-        static On = {};
-        static ConfiguredName = {};
-      },
-      uuid: {
-        generate: jest.fn((str) => `uuid-${str}`),
-      },
-    },
-    platformAccessory: class MockAccessory {
-      constructor(name, uuid) {
-        this.UUID = uuid;
-        this.displayName = name;
-        this.context = {};
-        this.services = [{ UUID: 'info-uuid' }];
-      }
-      getService() {
-        return { setCharacteristic: jest.fn().mockReturnThis() };
-      }
-      addService() {
-        const service = {
-          setCharacteristic: jest.fn().mockReturnThis(),
-          getCharacteristic: jest.fn().mockReturnThis(),
-          updateCharacteristic: jest.fn(),
-        };
-        service.getCharacteristic.mockReturnValue({
-          onGet: jest.fn().mockReturnThis(),
-          onSet: jest.fn().mockReturnThis(),
-        });
-        this.services.push(service);
-        return service;
-      }
-      removeService() {}
-      getServiceById() {
-        return null;
-      }
-    },
-    registerPlatform: jest.fn(),
-  };
+const { createMockHomebridgeEnvironment } = require('../test/helpers/homebridge');
 
-  // Load platform with mocked Homebridge
-  const platformModule = require('./platform');
-  platformModule(mockHomebridge);
+const { MoparPlatform, mockHomebridge } = createMockHomebridgeEnvironment();
 
-  // Extract the platform class from the registration call
-  const registrationCall = mockHomebridge.registerPlatform.mock.calls[0];
-  return registrationCall[2];
-})();
+const Characteristic = mockHomebridge.hap.Characteristic;
+const Service = mockHomebridge.hap.Service;
 
 describe('MoparPlatform', () => {
   let platform;
@@ -98,6 +40,8 @@ describe('MoparPlatform', () => {
       registerPlatformAccessories: jest.fn(),
       unregisterPlatformAccessories: jest.fn(),
     };
+
+    mockLog.warn = jest.fn();
 
     // Mock config
     mockConfig = {
@@ -177,7 +121,8 @@ describe('MoparPlatform', () => {
 
       await platform.initialize();
 
-      expect(mockLog.error).toHaveBeenCalledWith('EMAIL AND PASSWORD REQUIRED!');
+      expect(mockLog.error).toHaveBeenCalledWith('CONFIGURATION ERRORS');
+      expect(mockLog.error).toHaveBeenCalledWith('1. Email is required');
       expect(MoparAuth).not.toHaveBeenCalled();
     });
 
@@ -187,7 +132,8 @@ describe('MoparPlatform', () => {
 
       await platform.initialize();
 
-      expect(mockLog.error).toHaveBeenCalledWith('EMAIL AND PASSWORD REQUIRED!');
+      expect(mockLog.error).toHaveBeenCalledWith('CONFIGURATION ERRORS');
+      expect(mockLog.error).toHaveBeenCalledWith('1. Password is required');
       expect(MoparAuth).not.toHaveBeenCalled();
     });
 
@@ -197,7 +143,9 @@ describe('MoparPlatform', () => {
 
       await platform.initialize();
 
-      expect(mockLog.error).toHaveBeenCalledWith('EMAIL AND PASSWORD REQUIRED!');
+      expect(mockLog.error).toHaveBeenCalledWith('CONFIGURATION ERRORS');
+      expect(mockLog.error).toHaveBeenCalledWith('1. Email is required');
+      expect(mockLog.error).toHaveBeenCalledWith('2. Password is required');
       expect(MoparAuth).not.toHaveBeenCalled();
     });
   });
@@ -403,7 +351,9 @@ describe('MoparPlatform', () => {
 
     test('should use mutex to prevent concurrent logins', async () => {
       platform.auth.areCookiesValid.mockReturnValue(false);
-      platform.auth.login.mockImplementation(() => new Promise((resolve) => setTimeout(() => resolve({ token: '123' }), 100)));
+      platform.auth.login.mockImplementation(
+        () => new Promise((resolve) => setTimeout(() => resolve({ token: '123' }), 100))
+      );
 
       // Start two concurrent authentication attempts
       const promise1 = platform.ensureAuthenticated();
@@ -450,6 +400,40 @@ describe('MoparPlatform', () => {
       expect(platform.moparAPI.sendCommand).toHaveBeenCalledWith('VIN123', 'LOCK', '1234');
       expect(mockLog).toHaveBeenCalledWith('Sending LOCK to VIN123...');
       expect(mockLog).toHaveBeenCalledWith('LOCK SUCCESS!');
+    });
+
+    test('configureLockService should create lock service when missing', () => {
+      platform = new MoparPlatform(mockLog, mockConfig, mockApi);
+      const mockCharacteristic = {
+        onGet: jest.fn().mockReturnThis(),
+        onSet: jest.fn().mockReturnThis(),
+      };
+      const mockService = {
+        getCharacteristic: jest.fn().mockReturnValue(mockCharacteristic),
+        updateCharacteristic: jest.fn(),
+      };
+      const accessory = {
+        addService: jest.fn().mockReturnValue(mockService),
+        getServiceById: jest.fn().mockReturnValue(null),
+        context: {},
+      };
+
+      platform.configureLockService(accessory, { vin: 'VIN123', year: '2022', make: 'JEEP', model: 'Wrangler' });
+
+      expect(accessory.addService).toHaveBeenCalledWith(expect.anything(), expect.any(String), 'VIN123-lock');
+      expect(accessory.getServiceById).toHaveBeenCalledWith(expect.anything(), 'VIN123-lock');
+      expect(mockCharacteristic.onSet).toHaveBeenCalled();
+      expect(mockCharacteristic.onGet).toHaveBeenCalled();
+    });
+
+    test('should block command when pin missing', async () => {
+      platform.pin = undefined;
+
+      const result = await platform.sendCommand('VIN123', 'LOCK');
+
+      expect(result).toBe(false);
+      expect(platform.moparAPI.sendCommand).not.toHaveBeenCalled();
+      expect(mockLog.warn).toHaveBeenCalledWith('REMOTE COMMAND BLOCKED');
     });
 
     test('should send unlock command successfully', async () => {
@@ -507,6 +491,16 @@ describe('MoparPlatform', () => {
       expect(platform.moparAPI.startEngine).toHaveBeenCalledWith('VIN123', '1234');
       expect(mockLog).toHaveBeenCalledWith('Starting engine for VIN123...');
       expect(mockLog).toHaveBeenCalledWith('Engine START SUCCESS!');
+    });
+
+    test('should block engine start when pin missing', async () => {
+      platform.pin = '12';
+
+      const result = await platform.startEngine('VIN123');
+
+      expect(result).toBe(false);
+      expect(platform.moparAPI.startEngine).not.toHaveBeenCalled();
+      expect(mockLog.warn).toHaveBeenCalledWith('REMOTE COMMAND BLOCKED');
     });
 
     test('should handle engine start failure', async () => {
@@ -568,6 +562,16 @@ describe('MoparPlatform', () => {
       expect(mockLog).toHaveBeenCalledWith('Engine STOP SUCCESS!');
     });
 
+    test('should block engine stop when pin missing', async () => {
+      platform.pin = undefined;
+
+      const result = await platform.stopEngine('VIN123');
+
+      expect(result).toBe(false);
+      expect(platform.moparAPI.stopEngine).not.toHaveBeenCalled();
+      expect(mockLog.warn).toHaveBeenCalledWith('REMOTE COMMAND BLOCKED');
+    });
+
     test('should handle engine stop failure', async () => {
       platform.moparAPI.pollCommandStatus.mockResolvedValue({ success: false, status: 'FAILED' });
 
@@ -611,6 +615,16 @@ describe('MoparPlatform', () => {
       expect(mockLog).toHaveBeenCalledWith('Horn and lights SUCCESS!');
     });
 
+    test('should block horn and lights when pin missing', async () => {
+      platform.pin = null;
+
+      const result = await platform.hornAndLights('VIN123');
+
+      expect(result).toBe(false);
+      expect(platform.moparAPI.hornAndLights).not.toHaveBeenCalled();
+      expect(mockLog.warn).toHaveBeenCalledWith('REMOTE COMMAND BLOCKED');
+    });
+
     test('should handle horn and lights failure', async () => {
       platform.moparAPI.pollCommandStatus.mockResolvedValue({ success: false, status: 'TIMEOUT' });
 
@@ -646,6 +660,16 @@ describe('MoparPlatform', () => {
       expect(mockLog).toHaveBeenCalledWith('Climate set to 72°F SUCCESS!');
     });
 
+    test('should block climate command when pin missing', async () => {
+      platform.pin = undefined;
+
+      const result = await platform.setClimate('VIN123', 72);
+
+      expect(result).toBe(false);
+      expect(platform.moparAPI.setClimate).not.toHaveBeenCalled();
+      expect(mockLog.warn).toHaveBeenCalledWith('REMOTE COMMAND BLOCKED');
+    });
+
     test('should handle climate control failure', async () => {
       platform.moparAPI.pollCommandStatus.mockResolvedValue({ success: false });
 
@@ -660,7 +684,9 @@ describe('MoparPlatform', () => {
       platform = new MoparPlatform(mockLog, mockConfig, mockApi);
       platform.auth = {
         areCookiesValid: jest.fn().mockReturnValue(false),
-        login: jest.fn().mockImplementation(() => new Promise((resolve) => setTimeout(() => resolve({ token: '123' }), 50))),
+        login: jest
+          .fn()
+          .mockImplementation(() => new Promise((resolve) => setTimeout(() => resolve({ token: '123' }), 50))),
         lastLogin: null,
       };
       platform.moparAPI = {
@@ -670,11 +696,7 @@ describe('MoparPlatform', () => {
     });
 
     test('concurrent ensureAuthenticated calls should only login once', async () => {
-      const promises = [
-        platform.ensureAuthenticated(),
-        platform.ensureAuthenticated(),
-        platform.ensureAuthenticated(),
-      ];
+      const promises = [platform.ensureAuthenticated(), platform.ensureAuthenticated(), platform.ensureAuthenticated()];
 
       await Promise.all(promises);
 
@@ -784,6 +806,52 @@ describe('MoparPlatform', () => {
 
       expect(result).toEqual([]);
       expect(platform.moparAPI.getVehiclesQuick).toHaveBeenCalledTimes(3);
+    });
+  });
+
+  describe('startStatusUpdates', () => {
+    beforeEach(() => {
+      jest.useFakeTimers();
+      platform = new MoparPlatform(mockLog, mockConfig, mockApi);
+      platform.ensureAuthenticated = jest.fn().mockResolvedValue();
+      platform.moparAPI = {
+        getVehicleStatus: jest.fn().mockResolvedValue({
+          available: true,
+          doorStatus: {
+            frontLeft: 'OPEN',
+            frontRight: 'CLOSED',
+            rearLeft: 'CLOSED',
+            rearRight: 'CLOSED',
+            trunk: 'CLOSED',
+          },
+        }),
+      };
+    });
+
+    afterEach(() => {
+      jest.clearAllTimers();
+      jest.useRealTimers();
+    });
+
+    test('updates contact sensors via getServiceById', async () => {
+      const contactService = {
+        updateCharacteristic: jest.fn(),
+      };
+      const accessory = {
+        context: { vehicle: { vin: 'VIN123' } },
+        getServiceById: jest.fn().mockReturnValue(contactService),
+        getService: jest.fn(),
+      };
+
+      platform.startStatusUpdates(accessory, { vin: 'VIN123' });
+
+      await jest.advanceTimersByTimeAsync(10000);
+
+      expect(accessory.getServiceById).toHaveBeenCalledWith(Service.ContactSensor, 'door-fl');
+      expect(contactService.updateCharacteristic).toHaveBeenCalledWith(
+        Characteristic.ContactSensorState,
+        Characteristic.ContactSensorState.CONTACT_NOT_DETECTED
+      );
     });
   });
 });

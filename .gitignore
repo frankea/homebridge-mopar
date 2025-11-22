@@ -162,4 +162,5 @@ homebridge-mopar.log.txt
 
 # IDE configs
 .cursor/
+.cursorrules/
 .vscode/

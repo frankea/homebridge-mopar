@@ -9,6 +9,8 @@ jobs:
   publish:
     name: Publish to npm
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     
     steps:
       - name: Checkout code
@@ -31,7 +33,14 @@ jobs:
         run: npm test -- --ci --maxWorkers=2
       
       - name: Publish to npm
-        run: npm publish
+        run: |
+          if [[ "${{ github.ref_name }}" == *"beta"* ]]; then
+            echo "Publishing as beta tag..."
+            npm publish --tag beta
+          else
+            echo "Publishing as latest tag..."
+            npm publish
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       
@@ -41,9 +50,11 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ github.ref_name }}
-          release_name: Release ${{ github.ref_name }}
+          release_name: Release ${{ github.ref_name }} (Beta)
           body: |
+            **⚠️ This is a beta release**
+            
             See [CHANGELOG.md](https://github.com/frankea/homebridge-mopar/blob/latest/CHANGELOG.md) for details.
           draft: false
-          prerelease: false
+          prerelease: true
 

@@ -841,7 +841,23 @@ class MoparAuth {
 
       return this.cookies;
     } catch (error) {
-      this.log(`Login error: ${error.message}`);
+      // User-friendly error messages
+      if (error.message.includes('net::ERR_NAME_NOT_RESOLVED') || error.code === 'ENOTFOUND') {
+        this.log.error('Cannot reach Mopar.com - Check your internet connection');
+      } else if (error.message.includes('timeout') || error.message.includes('Navigation timeout')) {
+        this.log.error('Login timed out - Mopar.com may be slow or unreachable');
+        this.log.error('Try again in a few minutes or check https://www.mopar.com/en-us/sign-in.html');
+      } else if (error.message.includes('ERR_CERT')) {
+        this.log.error('SSL/Certificate error - Check your system time and date settings');
+      } else if (error.message.includes('Execution context was destroyed')) {
+        this.log.error('Browser session crashed - This is usually temporary, try restarting Homebridge');
+      } else {
+        this.log.error(`Login failed: ${error.message}`);
+        this.log.error('Please verify your Mopar.com credentials are correct');
+      }
+
+      this.debug(`Full error: ${error.stack}`);
+
       // Close browser on error
       if (browser) {
         browser.close().catch(() => {});

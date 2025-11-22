@@ -91,6 +91,18 @@ describe('MoparAPI', () => {
       );
     });
 
+    test('getCSRFToken should retry once before succeeding', async () => {
+      mockSession.get
+        .mockRejectedValueOnce(new Error('timeout'))
+        .mockResolvedValueOnce({ data: { token: 'csrf_retry' } });
+
+      const token = await api.getCSRFToken();
+
+      expect(token).toBe('csrf_retry');
+      expect(mockSession.get).toHaveBeenCalledTimes(2);
+      expect(mockLog).toHaveBeenCalledWith(expect.stringContaining('CSRF token fetch failed'));
+    });
+
     test('ensureFreshCSRFToken should not refresh if token is fresh', async () => {
       api.csrfToken = 'existing_token';
       api.csrfTokenTimestamp = Date.now(); // Fresh token
@@ -157,14 +169,15 @@ describe('MoparAPI', () => {
     });
 
     test('should continue if CSRF token fetch fails', async () => {
-      mockSession.get.mockRejectedValueOnce(new Error('Token error'));
-      mockSession.get.mockResolvedValueOnce({
-        data: { uid: 'user123' },
-      });
+      mockSession.get
+        .mockRejectedValueOnce(new Error('Token error'))
+        .mockResolvedValueOnce({ data: { token: 'csrf123' } })
+        .mockResolvedValueOnce({ data: { uid: 'user123' } });
 
       await api.initialize();
 
       expect(mockLog).toHaveBeenCalledWith('Profile initialized');
+      expect(mockSession.get).toHaveBeenCalledTimes(3);
     });
   });
 
@@ -187,6 +200,33 @@ describe('MoparAPI', () => {
         expect.stringContaining('/moparsvc/user/getProfile'),
         expect.any(Object)
       );
+    });
+
+    test('should retry on 403 error and succeed', async () => {
+      mockSession.get
+        .mockResolvedValueOnce({
+          data: { errorCode: '403', errorDesc: 'Unauthorized Access', status: 'failed' },
+        })
+        .mockResolvedValueOnce({
+          data: { errorCode: '403', errorDesc: 'Unauthorized Access', status: 'failed' },
+        })
+        .mockResolvedValueOnce({
+          data: { uid: 'user123' },
+        });
+
+      const profile = await api.getProfile();
+
+      expect(profile.uid).toBe('user123');
+      expect(mockSession.get).toHaveBeenCalledTimes(3);
+    });
+
+    test('should fail after max retries on persistent 403', async () => {
+      mockSession.get.mockResolvedValue({
+        data: { errorCode: '403', errorDesc: 'Unauthorized Access', status: 'failed' },
+      });
+
+      await expect(api.getProfile()).rejects.toThrow('Profile request failed: Unauthorized Access (403)');
+      expect(mockSession.get).toHaveBeenCalledTimes(3);
     });
   });
 
@@ -478,11 +518,227 @@ describe('MoparAPI', () => {
   });
 
   describe('Get Vehicle Status', () => {
-    test('should return stub response', async () => {
+    test('should return status from VHR data when available', async () => {
+      mockSession.get.mockResolvedValueOnce({
+        data: {
+          available: true,
+          doors: {
+            frontLeft: 'CLOSED',
+            frontRight: 'CLOSED',
+            rearLeft: 'OPEN',
+            rearRight: 'CLOSED',
+            trunk: 'CLOSED',
+          },
+          locked: true,
+          battery: { level: 85 },
+          engine: 'OFF',
+        },
+      });
+
+      const status = await api.getVehicleStatus('VIN123');
+
+      expect(status.available).toBe(true);
+      expect(status.doorStatus.frontLeft).toBe('CLOSED');
+      expect(status.doorStatus.rearLeft).toBe('OPEN');
+      expect(status.lockStatus).toBe('LOCKED');
+      expect(status.batteryLevel).toBe(85);
+      expect(status.engineRunning).toBe(false);
+    });
+
+    test('should fall back to vehicle list when VHR not available', async () => {
+      // VHR returns not available
+      mockSession.get.mockResolvedValueOnce({
+        data: { available: false },
+      });
+
+      // getVehiclesQuick returns basic data
+      mockSession.get.mockResolvedValueOnce({
+        data: [
+          {
+            vin: 'VIN123',
+            lockStatus: 'LOCKED',
+            odometer: 15000,
+          },
+        ],
+      });
+
+      const status = await api.getVehicleStatus('VIN123');
+
+      expect(status.available).toBe(true);
+      expect(status.lockStatus).toBe('LOCKED');
+      expect(status.odometer).toBe(15000);
+      expect(status.doorStatus).toBeDefined();
+    });
+
+    test('should return error when no data available', async () => {
+      mockSession.get
+        .mockResolvedValueOnce({ data: { available: false } }) // VHR
+        .mockResolvedValueOnce({ data: [] }); // Empty vehicle list
+
       const status = await api.getVehicleStatus('VIN123');
 
       expect(status.available).toBe(false);
-      expect(status.error).toContain('Real-time status requires vehicle wakeup');
+      expect(status.error).toBe('No status data available for this vehicle');
+    });
+
+    test('should refresh status when requested', async () => {
+      // Mock CSRF token refresh
+      mockSession.get.mockResolvedValueOnce({ data: { token: 'csrf123' } });
+
+      // Mock refresh endpoint
+      mockSession.post.mockResolvedValueOnce({ data: { success: true } });
+
+      // Mock VHR data
+      mockSession.get.mockResolvedValueOnce({
+        data: {
+          available: true,
+          battery: 90,
+          locked: false,
+        },
+      });
+
+      const status = await api.getVehicleStatus('VIN123', true);
+
+      expect(mockSession.post).toHaveBeenCalledWith(
+        'https://www.mopar.com/moparsvc/connect/refresh',
+        expect.any(String),
+        expect.any(Object)
+      );
+      expect(status.available).toBe(true);
+      expect(status.batteryLevel).toBe(90);
+    });
+  });
+
+  describe('parseVHRData', () => {
+    test('should parse complete VHR data', () => {
+      const vhrData = {
+        doors: {
+          frontLeft: 'CLOSED',
+          frontRight: 'OPEN',
+          rearLeft: 'CLOSED',
+          rearRight: 'CLOSED',
+          trunk: 'OPEN',
+        },
+        locked: true,
+        engine: 'RUNNING',
+        battery: { level: 75 },
+        odometer: 25000,
+        fuel: { percent: 50 },
+      };
+
+      const result = api.parseVHRData(vhrData);
+
+      expect(result.doorStatus.frontLeft).toBe('CLOSED');
+      expect(result.doorStatus.frontRight).toBe('OPEN');
+      expect(result.doorStatus.trunk).toBe('OPEN');
+      expect(result.lockStatus).toBe('LOCKED');
+      expect(result.engineRunning).toBe(true);
+      expect(result.batteryLevel).toBe(75);
+      expect(result.odometer).toBe(25000);
+      expect(result.fuelLevel).toBe(50);
+    });
+
+    test('should handle alternative door field names', () => {
+      const vhrData = {
+        doors: {
+          driverFront: 'OPEN',
+          passengerFront: 'CLOSED',
+          driverRear: 'OPEN',
+          passengerRear: 'CLOSED',
+          liftgate: 'CLOSED',
+        },
+      };
+
+      const result = api.parseVHRData(vhrData);
+
+      expect(result.doorStatus.frontLeft).toBe('OPEN');
+      expect(result.doorStatus.frontRight).toBe('CLOSED');
+      expect(result.doorStatus.rearLeft).toBe('OPEN');
+      expect(result.doorStatus.trunk).toBe('CLOSED');
+    });
+
+    test('should handle numeric battery level', () => {
+      const vhrData = {
+        battery: 90,
+      };
+
+      const result = api.parseVHRData(vhrData);
+
+      expect(result.batteryLevel).toBe(90);
+    });
+
+    test('should handle numeric fuel level', () => {
+      const vhrData = {
+        fuel: 65,
+      };
+
+      const result = api.parseVHRData(vhrData);
+
+      expect(result.fuelLevel).toBe(65);
+    });
+  });
+
+  describe('parseDoorStatus', () => {
+    test('should parse door status from vehicle', () => {
+      const vehicle = {
+        doors: {
+          frontLeft: 'OPEN',
+          frontRight: 'CLOSED',
+          rearLeft: 'OPEN',
+          rearRight: 'OPEN',
+          trunk: 'CLOSED',
+        },
+      };
+
+      const result = api.parseDoorStatus(vehicle);
+
+      expect(result.frontLeft).toBe('OPEN');
+      expect(result.frontRight).toBe('CLOSED');
+      expect(result.rearLeft).toBe('OPEN');
+      expect(result.rearRight).toBe('OPEN');
+      expect(result.trunk).toBe('CLOSED');
+    });
+
+    test('should return all closed when no door data', () => {
+      const vehicle = {};
+
+      const result = api.parseDoorStatus(vehicle);
+
+      expect(result.frontLeft).toBe('CLOSED');
+      expect(result.frontRight).toBe('CLOSED');
+      expect(result.rearLeft).toBe('CLOSED');
+      expect(result.rearRight).toBe('CLOSED');
+      expect(result.trunk).toBe('CLOSED');
+    });
+  });
+
+  describe('parseBatteryLevel', () => {
+    test('should return battery level from vehicle', () => {
+      const vehicle = {
+        battery: { level: 80 },
+      };
+
+      const result = api.parseBatteryLevel(vehicle);
+
+      expect(result).toBe(80);
+    });
+
+    test('should handle numeric battery value', () => {
+      const vehicle = {
+        battery: 95,
+      };
+
+      const result = api.parseBatteryLevel(vehicle);
+
+      expect(result).toBe(95);
+    });
+
+    test('should default to 100 when no battery data', () => {
+      const vehicle = {};
+
+      const result = api.parseBatteryLevel(vehicle);
+
+      expect(result).toBe(100);
     });
   });
 
