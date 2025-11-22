@@ -25,12 +25,12 @@ class ConfigValidator {
       errors.push('Password is required');
     } else {
       const password = config.password;
-      
+
       // Only validate minimum length - existing passwords may not meet current Mopar requirements
       if (password.length < 8) {
         errors.push('Password must be at least 8 characters');
       }
-      
+
       // Warn if password seems too long (Mopar used to have 16 char limit)
       if (password.length > 20) {
         errors.push('Password seems unusually long (may not work with Mopar.com)');

@@ -126,13 +126,7 @@ describe('ConfigValidator', () => {
     });
 
     test('should still enforce PIN even with valid passwords', () => {
-      const validPasswords = [
-        'password123',
-        'PASSWORD123',
-        'Password',
-        'MyPass42!',
-        'Secure$2024',
-      ];
+      const validPasswords = ['password123', 'PASSWORD123', 'Password', 'MyPass42!', 'Secure$2024'];
 
       validPasswords.forEach((password) => {
         const config = { email: 'test@example.com', password };
