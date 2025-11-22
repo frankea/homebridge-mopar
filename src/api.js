@@ -109,16 +109,32 @@ class MoparAPI {
     }
   }
 
-  async getCSRFToken() {
-    const response = await this.session.get(`${this.baseURL}/moparsvc/token`, {
-      headers: {
-        Referer: 'https://www.mopar.com/chrysler/en-us/my-vehicle/dashboard.html',
-      },
-    });
-    this.csrfToken = response.data.token;
-    this.csrfTokenTimestamp = Date.now();
-    this.debug(`CSRF token refreshed: ${this.csrfToken?.substring(0, 20)}...`);
-    return this.csrfToken;
+  async getCSRFToken(maxAttempts = 2, retryDelayMs = 750) {
+    const tokenUrl = `${this.baseURL}/moparsvc/token`;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const response = await this.session.get(tokenUrl, {
+          headers: {
+            Referer: 'https://www.mopar.com/chrysler/en-us/my-vehicle/dashboard.html',
+          },
+        });
+        this.csrfToken = response.data.token;
+        this.csrfTokenTimestamp = Date.now();
+        this.debug(`CSRF token refreshed: ${this.csrfToken?.substring(0, 20)}...`);
+        return this.csrfToken;
+      } catch (error) {
+        if (attempt >= maxAttempts) {
+          this.log(`ERROR: Failed to refresh CSRF token after ${attempt} attempts: ${error.message}`);
+          throw error;
+        }
+
+        this.log(`WARNING: CSRF token fetch failed (attempt ${attempt}): ${error.message}. Retrying...`);
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+      }
+    }
+
+    return null;
   }
 
   /**

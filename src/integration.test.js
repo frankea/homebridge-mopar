@@ -27,6 +27,7 @@ const { wrapper } = require('axios-cookiejar-support');
 const tough = require('tough-cookie');
 const MoparAuth = require('./auth');
 const MoparAPI = require('./api');
+const { createMockPage, createMockBrowser, mockPuppeteerLaunch } = require('../test/helpers/puppeteer');
 
 describe('Integration Tests', () => {
   let mockBrowser;
@@ -43,90 +44,64 @@ describe('Integration Tests', () => {
     mockLog.warn = jest.fn();
 
     // Mock Puppeteer
-    mockPage = {
-      setViewport: jest.fn().mockResolvedValue(),
-      setUserAgent: jest.fn().mockResolvedValue(),
-      goto: jest.fn().mockResolvedValue(),
-      waitForSelector: jest.fn().mockResolvedValue(),
-      $eval: jest.fn().mockResolvedValue('test@example.com'),
-      evaluate: jest.fn().mockImplementation((fn) => {
-        // Return appropriate values based on what the function does
-        const fnStr = fn.toString();
+    mockPage = createMockPage();
+    mockPage.$eval.mockResolvedValue('test@example.com');
+    mockPage.evaluate.mockImplementation((fn) => {
+      const fnStr = fn.toString();
 
-        // Email field fill
-        if (fnStr.includes('input[name="username"]') && fnStr.includes('value =')) {
-          return Promise.resolve();
-        }
-        // Password field fill
-        if (fnStr.includes('input[name="password"]') && fnStr.includes('value =')) {
-          return Promise.resolve();
-        }
-        // Form validation events
-        if (fnStr.includes('input[name="username"]') && fnStr.includes('dispatchEvent')) {
-          return Promise.resolve();
-        }
-        // Screenshot/diagnostic checks
-        if (fnStr.includes('window.getComputedStyle')) {
-          return Promise.resolve({ visible: true, disabled: false, text: 'Sign In' });
-        }
-        // Button click
-        if (fnStr.includes('el.click()')) {
-          return Promise.resolve();
-        }
-        // Form submission via Gigya API
-        if (fnStr.includes('gigya.accounts.login')) {
-          return Promise.resolve({ method: 'gigya-api', attempted: true, success: true });
-        }
-        // Gigya session check
-        if (fnStr.includes('gigya.accounts.getAccountInfo')) {
-          return Promise.resolve({
-            authenticated: true,
-            uid: 'user123',
-            uidSignature: 'sig123',
-            signatureTimestamp: Date.now(),
-            profile: { firstName: 'Test', lastName: 'User' },
-          });
-        }
-        // CSRF token extraction
-        if (fnStr.includes(':cq_csrf_token')) {
-          return Promise.resolve(null);
-        }
-        // Form POST submission
-        if (fnStr.includes('form.submit()') || fnStr.includes('form.action')) {
-          return Promise.resolve();
-        }
-        // Scroll/trigger data load
-        if (fnStr.includes('scrollTo')) {
-          return Promise.resolve();
-        }
-        // Default
-        return Promise.resolve({});
-      }),
-      cookies: jest.fn().mockResolvedValue([{ name: 'glt_test', value: 'token123', domain: '.mopar.com' }]),
-      on: jest.fn(),
-      off: jest.fn(),
-      url: jest.fn().mockReturnValue('https://www.mopar.com/chrysler/en-us/my-vehicle/dashboard.html'),
-      keyboard: {
-        down: jest.fn(),
-        press: jest.fn(),
-        up: jest.fn(),
-      },
-      focus: jest.fn(),
-      click: jest.fn(),
-      type: jest.fn(),
-      screenshot: jest.fn().mockResolvedValue(),
-      content: jest.fn().mockResolvedValue('<html></html>'),
-      title: jest.fn().mockResolvedValue('Mopar'),
-      waitForNavigation: jest.fn().mockResolvedValue(),
-      $: jest.fn().mockResolvedValue({}),
-    };
+      if (fnStr.includes('input[name="username"]') && fnStr.includes('value =')) {
+        return Promise.resolve();
+      }
+      if (fnStr.includes('input[name="password"]') && fnStr.includes('value =')) {
+        return Promise.resolve();
+      }
+      if (fnStr.includes('input[name="username"]') && fnStr.includes('dispatchEvent')) {
+        return Promise.resolve();
+      }
+      if (fnStr.includes('window.getComputedStyle')) {
+        return Promise.resolve({ visible: true, disabled: false, text: 'Sign In' });
+      }
+      if (fnStr.includes('el.click()')) {
+        return Promise.resolve();
+      }
+      if (fnStr.includes('gigya.accounts.login')) {
+        return Promise.resolve({ method: 'gigya-api', attempted: true, success: true });
+      }
+      if (fnStr.includes('gigya.accounts.getAccountInfo')) {
+        return Promise.resolve({
+          authenticated: true,
+          uid: 'user123',
+          uidSignature: 'sig123',
+          signatureTimestamp: Date.now(),
+          profile: { firstName: 'Test', lastName: 'User' },
+        });
+      }
+      if (fnStr.includes(':cq_csrf_token')) {
+        return Promise.resolve(null);
+      }
+      if (fnStr.includes('form.submit()') || fnStr.includes('form.action')) {
+        return Promise.resolve();
+      }
+      if (fnStr.includes('scrollTo')) {
+        return Promise.resolve();
+      }
+      return Promise.resolve({});
+    });
+    mockPage.cookies.mockResolvedValue([{ name: 'glt_test', value: 'token123', domain: '.mopar.com' }]);
+    mockPage.on = jest.fn();
+    mockPage.off = jest.fn();
+    mockPage.url.mockReturnValue('https://www.mopar.com/chrysler/en-us/my-vehicle/dashboard.html');
+    mockPage.focus = jest.fn();
+    mockPage.click = jest.fn();
+    mockPage.type = jest.fn();
+    mockPage.screenshot.mockResolvedValue();
+    mockPage.content.mockResolvedValue('<html></html>');
+    mockPage.title.mockResolvedValue('Mopar');
+    mockPage.waitForNavigation.mockResolvedValue();
+    mockPage.$.mockResolvedValue({});
 
-    mockBrowser = {
-      newPage: jest.fn().mockResolvedValue(mockPage),
-      close: jest.fn().mockResolvedValue(),
-    };
-
-    puppeteer.launch.mockResolvedValue(mockBrowser);
+    mockBrowser = createMockBrowser(mockPage);
+    mockPuppeteerLaunch(mockBrowser);
 
     // Mock axios
     mockSession = {

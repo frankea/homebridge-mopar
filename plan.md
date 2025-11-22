@@ -26,5 +26,10 @@
 8. **Documentation updates**  
    - Revise [`README.md`](README.md:48) configuration table, [`config.schema.json`](config.schema.json:1) descriptions, and [`CHANGELOG.md`](CHANGELOG.md:7) entries to reflect PIN requirements, diagnostics flag, lock architecture changes, and timer/limiter behavior.
 
-9. **Branch & sequencing guidance**  
+9. **Branch & sequencing guidance**
    - Implement work on a new branch (e.g., `feature/pin-lock-refactor`). Suggested order: config/doc updates → platform service changes (locks/sensors/timers) → rate limiter pruning → MoparAuth modularization → expanded tests → final README/CHANGELOG polish.
+
+10. **Automated testing workflow hardening**
+    - Multi-project Jest config (unit/integration/e2e) with setup hooks per layer.
+    - Shared helpers for Homebridge and Puppeteer mocks to keep suites deterministic.
+    - GitHub Actions pipeline split into lint, unit matrix, integration, optional smoke, and coverage upload.

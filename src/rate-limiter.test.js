@@ -115,6 +115,20 @@ describe('RateLimiter', () => {
       expect(result.waitTime).toBeLessThanOrEqual(3600000); // 1 hour
     });
 
+    test('should evict stale requests before evaluating limits', () => {
+      const vin = 'VIN123';
+      const now = Date.now();
+
+      jest.setSystemTime(new Date(now - 600001));
+      rateLimiter.canExecute('lock', vin);
+
+      jest.setSystemTime(new Date(now));
+      const result = rateLimiter.canExecute('lock', vin);
+
+      expect(result.allowed).toBe(true);
+      expect(rateLimiter.requests.get(`lock_${vin}`)).toHaveLength(1);
+    });
+
     test('should handle hornLights rate limit', () => {
       // hornLights has limit of 5 per 5 minutes
       for (let i = 0; i < 5; i++) {

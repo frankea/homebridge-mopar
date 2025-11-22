@@ -138,6 +138,20 @@ For each vehicle, the plugin creates:
 - Chromium/Chrome (automatically installed with Puppeteer)
 - Active Mopar.com account with remote services
 
+## Testing & Quality Assurance
+
+The project ships with a multi-project Jest configuration so you can target specific layers:
+
+| Command | Description |
+|---------|-------------|
+| `npm run lint` | ESLint + Prettier formatting checks |
+| `npm run test:unit` | Fast unit suite (config validator, rate limiter, metrics, etc.) |
+| `npm run test:integration` | Auth/API/platform integration flows with mocked Puppeteer + axios |
+| `npm run test:e2e` | Optional smoke tests that require `MOPAR_EMAIL`, `MOPAR_PASSWORD`, and `MOPAR_PIN` |
+| `npm run test:coverage` | Generates HTML/LCOV coverage reports |
+
+> Tip: set `PUPPETEER_EXECUTABLE_PATH` if your platform requires a custom Chromium binary (see troubleshooting below).
+
 ## Troubleshooting
 
 ### Plugin Not Loading

@@ -91,6 +91,18 @@ describe('MoparAPI', () => {
       );
     });
 
+    test('getCSRFToken should retry once before succeeding', async () => {
+      mockSession.get
+        .mockRejectedValueOnce(new Error('timeout'))
+        .mockResolvedValueOnce({ data: { token: 'csrf_retry' } });
+
+      const token = await api.getCSRFToken();
+
+      expect(token).toBe('csrf_retry');
+      expect(mockSession.get).toHaveBeenCalledTimes(2);
+      expect(mockLog).toHaveBeenCalledWith(expect.stringContaining('CSRF token fetch failed'));
+    });
+
     test('ensureFreshCSRFToken should not refresh if token is fresh', async () => {
       api.csrfToken = 'existing_token';
       api.csrfTokenTimestamp = Date.now(); // Fresh token
@@ -157,14 +169,15 @@ describe('MoparAPI', () => {
     });
 
     test('should continue if CSRF token fetch fails', async () => {
-      mockSession.get.mockRejectedValueOnce(new Error('Token error'));
-      mockSession.get.mockResolvedValueOnce({
-        data: { uid: 'user123' },
-      });
+      mockSession.get
+        .mockRejectedValueOnce(new Error('Token error'))
+        .mockResolvedValueOnce({ data: { token: 'csrf123' } })
+        .mockResolvedValueOnce({ data: { uid: 'user123' } });
 
       await api.initialize();
 
       expect(mockLog).toHaveBeenCalledWith('Profile initialized');
+      expect(mockSession.get).toHaveBeenCalledTimes(3);
     });
   });
 

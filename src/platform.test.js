@@ -9,70 +9,9 @@ jest.mock('./api');
 const MoparAuth = require('./auth');
 const MoparAPI = require('./api');
 
-// Mock Homebridge globals
-const { MoparPlatform, mockHomebridge } = (() => {
-  const mockHomebridge = {
-    hap: {
-      Service: class MockService {
-        static AccessoryInformation = { UUID: 'info-uuid' };
-        static LockMechanism = { UUID: 'lock-uuid' };
-        static Switch = { UUID: 'switch-uuid' };
-        static Battery = { UUID: 'battery-uuid' };
-        static ContactSensor = { UUID: 'contact-uuid' };
-      },
-      Characteristic: class MockCharacteristic {
-        static LockCurrentState = { UNKNOWN: 3, SECURED: 1, UNSECURED: 0 };
-        static LockTargetState = { SECURED: 1, UNSECURED: 0 };
-        static ContactSensorState = { CONTACT_DETECTED: 0, CONTACT_NOT_DETECTED: 1 };
-        static BatteryLevel = {};
-        static StatusLowBattery = { BATTERY_LEVEL_LOW: 1, BATTERY_LEVEL_NORMAL: 0 };
-        static ChargingState = { CHARGING: 1, NOT_CHARGING: 0 };
-        static On = {};
-        static ConfiguredName = {};
-      },
-      uuid: {
-        generate: jest.fn((str) => `uuid-${str}`),
-      },
-    },
-    platformAccessory: class MockAccessory {
-      constructor(name, uuid) {
-        this.UUID = uuid;
-        this.displayName = name;
-        this.context = {};
-        this.services = [{ UUID: 'info-uuid' }];
-      }
-      getService() {
-        return { setCharacteristic: jest.fn().mockReturnThis() };
-      }
-      addService() {
-        const service = {
-          setCharacteristic: jest.fn().mockReturnThis(),
-          getCharacteristic: jest.fn().mockReturnThis(),
-          updateCharacteristic: jest.fn(),
-        };
-        service.getCharacteristic.mockReturnValue({
-          onGet: jest.fn().mockReturnThis(),
-          onSet: jest.fn().mockReturnThis(),
-        });
-        this.services.push(service);
-        return service;
-      }
-      removeService() {}
-      getServiceById() {
-        return null;
-      }
-    },
-    registerPlatform: jest.fn(),
-  };
+const { createMockHomebridgeEnvironment } = require('../test/helpers/homebridge');
 
-  // Load platform with mocked Homebridge
-  const platformModule = require('./platform');
-  platformModule(mockHomebridge);
-
-  // Extract the platform class from the registration call
-  const registrationCall = mockHomebridge.registerPlatform.mock.calls[0];
-  return { MoparPlatform: registrationCall[2], mockHomebridge };
-})();
+const { MoparPlatform, mockHomebridge } = createMockHomebridgeEnvironment();
 
 const Characteristic = mockHomebridge.hap.Characteristic;
 const Service = mockHomebridge.hap.Service;
@@ -867,6 +806,52 @@ describe('MoparPlatform', () => {
 
       expect(result).toEqual([]);
       expect(platform.moparAPI.getVehiclesQuick).toHaveBeenCalledTimes(3);
+    });
+  });
+
+  describe('startStatusUpdates', () => {
+    beforeEach(() => {
+      jest.useFakeTimers();
+      platform = new MoparPlatform(mockLog, mockConfig, mockApi);
+      platform.ensureAuthenticated = jest.fn().mockResolvedValue();
+      platform.moparAPI = {
+        getVehicleStatus: jest.fn().mockResolvedValue({
+          available: true,
+          doorStatus: {
+            frontLeft: 'OPEN',
+            frontRight: 'CLOSED',
+            rearLeft: 'CLOSED',
+            rearRight: 'CLOSED',
+            trunk: 'CLOSED',
+          },
+        }),
+      };
+    });
+
+    afterEach(() => {
+      jest.clearAllTimers();
+      jest.useRealTimers();
+    });
+
+    test('updates contact sensors via getServiceById', async () => {
+      const contactService = {
+        updateCharacteristic: jest.fn(),
+      };
+      const accessory = {
+        context: { vehicle: { vin: 'VIN123' } },
+        getServiceById: jest.fn().mockReturnValue(contactService),
+        getService: jest.fn(),
+      };
+
+      platform.startStatusUpdates(accessory, { vin: 'VIN123' });
+
+      await jest.advanceTimersByTimeAsync(10000);
+
+      expect(accessory.getServiceById).toHaveBeenCalledWith(Service.ContactSensor, 'door-fl');
+      expect(contactService.updateCharacteristic).toHaveBeenCalledWith(
+        Characteristic.ContactSensorState,
+        Characteristic.ContactSensorState.CONTACT_NOT_DETECTED
+      );
     });
   });
 });
