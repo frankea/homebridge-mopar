@@ -1,5 +1,5 @@
 name: Test
-
+ 
 on:
   push:
     # Run this workflow on every branch so required checks don't fail without executing
@@ -7,6 +7,9 @@ on:
       - '**'
   pull_request:
     branches: [ latest, main ]
+
+env:
+  HAS_MOPAR_SECRETS: ${{ secrets.MOPAR_EMAIL != '' && secrets.MOPAR_PASSWORD != '' && secrets.MOPAR_PIN != '' }}
 
 jobs:
   lint:
@@ -59,7 +62,7 @@ jobs:
   e2e-smoke:
     name: E2E smoke tests
     needs: integration
-    if: ${{ secrets.MOPAR_EMAIL != '' && secrets.MOPAR_PASSWORD != '' && secrets.MOPAR_PIN != '' }}
+    if: ${{ env.HAS_MOPAR_SECRETS == 'true' }}
     runs-on: ubuntu-latest
     env:
       MOPAR_EMAIL: ${{ secrets.MOPAR_EMAIL }}
